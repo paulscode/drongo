@@ -85,6 +85,23 @@ public class HeaderChainState {
         if(!isFullDifficultyRules()) {
             return header.getDifficultyTarget();    //linkage and the header's own proof of work only; verifyProofOfWork() still enforces powLimit
         }
+
+        long requiredBits = getRetargetedDifficulty();
+
+        //The proof of work changes algorithm at the activation height, and the target is eased once to match, so the block there
+        //carries neither its predecessor's target nor a retarget of it. Knots applies this on top of the ordinary rule rather
+        //than instead of it (GetNextWorkRequired in src/pow.cpp), which matters when the activation height is also a period
+        //boundary: the retarget is computed first and the shift lands on its result. Mainnet's activation at 961640 is not a
+        //boundary, so there the shift lands on the target carried forward within the period.
+        if(Blake2bDeployment.isActivationHeight(Network.get(), height + 1)) {
+            return Blake2bDeployment.applyTargetShift(Network.get(), requiredBits);
+        }
+
+        return requiredBits;
+    }
+
+    /** The target the next header would be required to use under the ordinary rules, before any proof-of-work change is applied. */
+    private long getRetargetedDifficulty() {
         if(height == anchorHeight) {
             return nextBits;    //the first header after the anchor is a period boundary whose target is the pinned bits; no period has been observed to retarget from
         }

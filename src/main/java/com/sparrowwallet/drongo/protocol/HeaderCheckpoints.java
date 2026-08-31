@@ -20,6 +20,16 @@ import java.util.Map;
  * The per-network list of pinned header hashes compiled into the binary and extended every feature release: the hash of the last
  * header of each difficulty period from genesis, with the compact target the following period is required to use.
  * The last entry anchors forward header validation; earlier entries verify historical headers by hash linkage.
+ *
+ * <p><b>mainnet.txt stops at height 961631 in this build, and must not be extended past it without deciding which chain to follow.</b>
+ * Bitcoin's mainnet split at height 961632, and a checkpoint above that pins one side of the split for everyone. Upstream Sparrow 2.5.4
+ * shipped 478 entries, pinning 963647, whose hash is a SHA256d-chain block that the BLAKE2b chain has never seen and, when this was
+ * written, had not yet reached. Anchoring there made the BLAKE2b chain unverifiable: the store starts at the anchor, and the anchor was
+ * both on the wrong chain and above the tip.
+ *
+ * <p>961631 is the last block the two chains share, so pinning it is correct for either. The cost is that the 2016 headers of the period
+ * above it are verified by proof of work and linkage rather than pinned by hash, which is the ordinary situation for every header above
+ * the last checkpoint anyway.
  */
 public class HeaderCheckpoints {
     private static final String CHECKPOINTS_RESOURCE_DIR = "/checkpoints/";
