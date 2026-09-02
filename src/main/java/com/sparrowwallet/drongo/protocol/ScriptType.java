@@ -1572,8 +1572,9 @@ public enum ScriptType {
         } else if(P2SH_P2WSH.equals(this)) {
             return (32 + 4 + 1 + 35 + ((double)107 / WITNESS_SCALE_FACTOR) + 4);
         } else if(P2TR.equals(this)) {
-            //Assume a default keypath spend
-            return (32 + 4 + 1 + ((double)66 / WITNESS_SCALE_FACTOR) + 4);
+            //Assume a keypath spend, sized for a signature carrying a hash type byte. There is no opted-in form of
+            //SIGHASH_DEFAULT, so an opted-in signature is 65 bytes rather than 64, and this has to cover the larger
+            return (32 + 4 + 1 + ((double)67 / WITNESS_SCALE_FACTOR) + 4);
         } else if(P2A.equals(this)) {
             return 32 + 4 + 1 + 4;
         } else if(Arrays.asList(WITNESS_TYPES).contains(this)) {

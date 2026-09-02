@@ -29,6 +29,7 @@ public class Keystore extends Persistable {
     private PaymentCode externalPaymentCode;
     private SilentPaymentScanAddress silentPaymentScanAddress;
     private byte[] deviceRegistration;
+    private boolean unifiedSigHashSupported;
     private MasterPrivateExtendedKey masterPrivateExtendedKey;
     private DeterministicSeed seed;
 
@@ -346,6 +347,28 @@ public class Keystore extends Persistable {
         return spendPrivKey;
     }
 
+    /**
+     * Whether this keystore's device signs the unified opt-in signature hash, which only its owner can say.
+     *
+     * A device reports its model over the wire and nothing about its firmware, and the split that matters here is
+     * within a model rather than between models: the same hardware runs firmware that implements the opt-in and
+     * firmware that does not. So there is nothing to detect, and this records what the user told the wallet.
+     *
+     * False by default, which is what keeps an unmarked device signing as it does today. A device asked for a hash
+     * type it does not implement does not fall back: it signs nothing and reports a generic failure of its own, and
+     * an airgapped one returns nothing for the wallet to notice that in. Assuming support would therefore break
+     * signing for every unmarked device rather than costing it replay protection.
+     *
+     * Meaningless for a software keystore, which signs from a seed the wallet holds and needs no such claim.
+     */
+    public boolean isUnifiedSigHashSupported() {
+        return unifiedSigHashSupported;
+    }
+
+    public void setUnifiedSigHashSupported(boolean unifiedSigHashSupported) {
+        this.unifiedSigHashSupported = unifiedSigHashSupported;
+    }
+
     public boolean isValid() {
         try {
             checkKeystore();
@@ -445,6 +468,7 @@ public class Keystore extends Persistable {
         copy.setId(getId());
         copy.setSource(source);
         copy.setWalletModel(walletModel);
+        copy.setUnifiedSigHashSupported(unifiedSigHashSupported);
         if(keyDerivation != null) {
             copy.setKeyDerivation(keyDerivation.copy());
         }

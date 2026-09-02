@@ -767,6 +767,155 @@ public class Transaction extends ChildMessage {
         }
     }
 
+    /**
+     * <p>Calculates the unified opt-in signature hash, one message format for every script type,
+     * selected per signature by SigHash.UNIFIED_FLAG in the hash type byte.</p>
+     *
+     * <p>The message is BIP341 shaped but is not BIP341: it commits to every spent amount and
+     * scriptPubKey for all four script types, which removes CVE-2013-2292 and CVE-2020-14199 from the
+     * types that predate taproot, for the inputs that opt in. Signatures over it are made and verified
+     * exactly as they are today for the script type in question.</p>
+     *
+     * @param spentUtxos   the ordered list of spent UTXOs corresponding to the inputs of this transaction
+     * @param inputIndex   input the signature is being calculated for
+     * @param scriptType   the script type byte the message is domain separated by
+     * @param scriptCode   for BARE and WITNESS_V0, the script the legacy rules already use; ignored otherwise
+     * @param sigHashType  the hash type byte, which must carry the opt-in bit
+     * @param annex        annex data for taproot and tapscript, or null
+     * @param tapLeafHash  the BIP341 leaf hash, required for TAPSCRIPT
+     * @param codeSeparatorPosition  the position of the last executed OP_CODESEPARATOR, or null for none
+     */
+    public synchronized Sha256Hash hashForUnifiedSignature(List<TransactionOutput> spentUtxos, int inputIndex, UnifiedScriptType scriptType,
+                                                           byte[] scriptCode, byte sigHashType, byte[] annex, byte[] tapLeafHash,
+                                                           Integer codeSeparatorPosition) {
+        if(spentUtxos.size() != getInputs().size()) {
+            throw new IllegalArgumentException("Provided spent UTXOs length does not equal the number of transaction inputs");
+        }
+        if(spentUtxos.stream().anyMatch(Objects::isNull)) {
+            throw new IllegalArgumentException("Not all spent UTXOs are provided");
+        }
+        if(inputIndex < 0 || inputIndex >= getInputs().size()) {
+            throw new IllegalArgumentException("Input index is greater than the number of transaction inputs");
+        }
+        if(!scriptType.isTaproot() && scriptCode == null) {
+            throw new IllegalArgumentException("A script code is required for script type " + scriptType);
+        }
+        if(scriptType == UnifiedScriptType.TAPSCRIPT && tapLeafHash == null) {
+            throw new IllegalArgumentException("A tapleaf hash is required for a tapscript spend");
+        }
+        if((sigHashType & SigHash.UNIFIED_FLAG) == 0) {
+            throw new IllegalArgumentException("Hash type " + Integer.toHexString(Byte.toUnsignedInt(sigHashType)) + " does not opt in");
+        }
+
+        int outType = sigHashType & 0x1f;
+        boolean anyoneCanPay = (sigHashType & SigHash.ANYONECANPAY.value) != 0;
+
+        //Each script type keeps the reading it has today. Bare, P2SH and segwit v0 take SINGLE and NONE by
+        //their low bits and everything else as ALL, so those bytes stay valid. Taproot and tapscript keep
+        //BIP341's, which refuses a hash type it does not define, so the bytes it reserved stay reserved.
+        if(scriptType.isTaproot()) {
+            if((sigHashType & ~(0x1f | SigHash.ANYONECANPAY.value | SigHash.UNIFIED_FLAG)) != 0
+                    || (outType != SigHash.ALL.value && outType != SigHash.NONE.value && outType != SigHash.SINGLE.value)) {
+                throw new IllegalArgumentException("Undefined hash type " + Integer.toHexString(Byte.toUnsignedInt(sigHashType)) + " for script type " + scriptType);
+            }
+        }
+
+        ByteArrayOutputStream bos = new UnsafeByteArrayOutputStream(length == UNKNOWN_LENGTH ? 256 : length + 4);
+        try {
+            //Laid out as BIP341 lays out its message, so the two can be read side by side. The epoch is
+            //BIP341's, kept so a later revision has the same room to move that BIP341 left itself.
+            bos.write(0x00);
+            //One byte, as BIP341 writes it and as the signature carries it: consensus reads the hash type
+            //from the last byte of the signature, so a wider field could hold a value no verifier would
+            //ever reconstruct.
+            bos.write(sigHashType & 0xff);
+            uint32ToByteStreamLE(this.version, bos);
+            //The locktime is committed to as five bytes rather than the four it occupies in a
+            //transaction. Four run out on 2106-02-07, and a hardfork widening the field later would
+            //otherwise have to change this message and invalidate every signature made under it. The
+            //fifth byte is zero until something sets it.
+            uint32ToByteStreamLE(this.locktime, bos);
+            bos.write(0);
+
+            if(!anyoneCanPay) {
+                ByteArrayOutputStream outpoints = new ByteArrayOutputStream();
+                ByteArrayOutputStream amounts = new ByteArrayOutputStream();
+                ByteArrayOutputStream scriptPubKeys = new ByteArrayOutputStream();
+                ByteArrayOutputStream sequences = new ByteArrayOutputStream();
+                for(int i = 0; i < getInputs().size(); i++) {
+                    TransactionInput input = getInputs().get(i);
+                    input.getOutpoint().bitcoinSerializeToStream(outpoints);
+                    Utils.int64ToByteStreamLE(spentUtxos.get(i).getValue(), amounts);
+                    byteArraySerialize(spentUtxos.get(i).getScriptBytes(), scriptPubKeys);
+                    Utils.uint32ToByteStreamLE(input.getSequenceNumber(), sequences);
+                }
+                bos.write(Sha256Hash.hash(outpoints.toByteArray()));
+                bos.write(Sha256Hash.hash(amounts.toByteArray()));
+                bos.write(Sha256Hash.hash(scriptPubKeys.toByteArray()));
+                bos.write(Sha256Hash.hash(sequences.toByteArray()));
+            }
+
+            if(outType != SigHash.NONE.value && outType != SigHash.SINGLE.value) {
+                //ALL, and every value that is neither NONE nor SINGLE
+                ByteArrayOutputStream outputs = new ByteArrayOutputStream();
+                for(TransactionOutput output : getOutputs()) {
+                    output.bitcoinSerializeToStream(outputs);
+                }
+                bos.write(Sha256Hash.hash(outputs.toByteArray()));
+            }
+
+            //Where BIP341 writes its spend type. It has an annex bit to pack in there and this has none to
+            //pack, so the byte carries the script type alone.
+            bos.write(scriptType.byteValue());
+
+            //Under ANYONECANPAY the aggregates are absent, so this input's own outpoint, spent output and
+            //sequence are committed to directly. Its position deliberately is not, so the input can still be
+            //moved into another transaction, which is the reason the flag exists.
+            if(anyoneCanPay) {
+                getInputs().get(inputIndex).getOutpoint().bitcoinSerializeToStream(bos);
+                Utils.int64ToByteStreamLE(spentUtxos.get(inputIndex).getValue(), bos);
+                byteArraySerialize(spentUtxos.get(inputIndex).getScriptBytes(), bos);
+                Utils.uint32ToByteStreamLE(getInputs().get(inputIndex).getSequenceNumber(), bos);
+            } else {
+                Utils.uint32ToByteStreamLE(inputIndex, bos);
+            }
+
+            if(!scriptType.isTaproot()) {
+                byteArraySerialize(scriptCode, bos);
+            } else {
+                //The annex is committed to, or it would be malleable.
+                bos.write(annex != null ? 0x01 : 0x00);
+                if(annex != null) {
+                    ByteArrayOutputStream annexStream = new ByteArrayOutputStream();
+                    byteArraySerialize(annex, annexStream);
+                    bos.write(Sha256Hash.hash(annexStream.toByteArray()));
+                }
+            }
+
+            //The single output, where BIP341 puts it.
+            if(outType == SigHash.SINGLE.value) {
+                //Unlike both algorithms this replaces, SINGLE with no output at the input's index is invalid
+                //rather than signable, as in BIP341.
+                if(inputIndex >= getOutputs().size()) {
+                    throw new IllegalArgumentException("No output at index " + inputIndex + " to sign with SIGHASH_SINGLE");
+                }
+                bos.write(Sha256Hash.hash(getOutputs().get(inputIndex).bitcoinSerialize()));
+            }
+
+            if(scriptType == UnifiedScriptType.TAPSCRIPT) {
+                //Without the leaf hash a signature made for one script leaf would be valid for any other
+                //leaf under the same key.
+                bos.write(tapLeafHash);
+                bos.write(0x00); //key version
+                Utils.uint32ToByteStreamLE(codeSeparatorPosition == null ? 0xffffffffL : Integer.toUnsignedLong(codeSeparatorPosition), bos);
+            }
+        } catch(IOException e) {
+            throw new RuntimeException(e);  // Cannot happen.
+        }
+
+        return Sha256Hash.wrap(Utils.taggedHash("UnifiedSighash", bos.toByteArray()));
+    }
+
     private void byteArraySerialize(byte[] bytes, OutputStream outputStream) throws IOException {
         outputStream.write(new VarInt(bytes.length).encode());
         outputStream.write(bytes);

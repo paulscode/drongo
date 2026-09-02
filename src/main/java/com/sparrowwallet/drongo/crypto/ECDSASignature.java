@@ -226,7 +226,11 @@ public class ECDSASignature {
             return false;
         }
 
-        int hashType = (signature[signature.length - 1] & 0xff) & ~SigHash.ANYONECANPAY.value; // mask the byte to prevent sign-extension hurting us
+        // Mask the byte to prevent sign-extension hurting us. The unified opt-in bit selects a signature
+        // hash algorithm rather than an output type, so it is masked off here as the reference does
+        // before the range check; without that a signature that opted in reads as an undefined hash type
+        // and its own PSBT cannot be parsed back.
+        int hashType = (signature[signature.length - 1] & 0xff) & ~SigHash.ANYONECANPAY.value & ~SigHash.UNIFIED_FLAG;
         if(hashType < SigHash.ALL.value || hashType > SigHash.SINGLE.value) {
             return false;
         }

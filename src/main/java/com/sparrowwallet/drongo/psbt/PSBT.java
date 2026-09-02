@@ -725,7 +725,9 @@ public class PSBT {
         if(sigHash == null) {
             return 0;
         }
-        return switch(sigHash) {
+        //As in PSBTInput.verifySigHash, an opted-in type scores as the type it is built on, so a combine
+        //cannot silently upgrade an input to a more permissive hash type by setting the opt-in bit.
+        return switch(sigHash.withoutUnified()) {
             case NONE, ANYONECANPAY_NONE -> 5;
             case ANYONECANPAY_SINGLE -> 4;
             case SINGLE -> 3;
@@ -761,7 +763,11 @@ public class PSBT {
         }
 
         for(PSBTInput input : getPsbtInputs()) {
+            //As in Wallet.sign, the unified opt-in is compared by its base type
             SigHash sigHash = input.getSigHash();
+            if(sigHash != null) {
+                sigHash = sigHash.withoutUnified();
+            }
             if(sigHash != null && sigHash != SigHash.ALL && sigHash != SigHash.DEFAULT) {
                 throw new PSBTProofException("Silent payment outputs require SIGHASH_ALL signatures only. Input at index " + input.getIndex() + " has sighash type: " + sigHash);
             }

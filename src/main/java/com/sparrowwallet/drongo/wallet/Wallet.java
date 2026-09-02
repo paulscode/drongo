@@ -1050,14 +1050,14 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
         TransactionInput txInput = null;
         if(getPolicyType().equals(PolicyType.SINGLE_HD) || getPolicyType().equals(PolicyType.SINGLE_SP)) {
             ECKey pubKey = receiveNode.getPubKey();
-            TransactionSignature signature = TransactionSignature.dummy(getScriptType().getSignatureType());
+            TransactionSignature signature = TransactionSignature.dummy(getScriptType().getSignatureType(), SigHash.UNIFIED_ALL.value);
             txInput = getScriptType().addSpendingInput(getPolicyType(), transaction, prevTxOut, pubKey, signature);
         } else if(getPolicyType().equals(PolicyType.MULTI_HD)) {
             List<ECKey> pubKeys = receiveNode.getPubKeys();
             int threshold = getDefaultPolicy().getNumSignaturesRequired();
             Map<ECKey, TransactionSignature> pubKeySignatures = new TreeMap<>(new ECKey.LexicographicECKeyComparator());
             for(int i = 0; i < pubKeys.size(); i++) {
-                pubKeySignatures.put(pubKeys.get(i), i < threshold ? TransactionSignature.dummy(getScriptType().getSignatureType()) : null);
+                pubKeySignatures.put(pubKeys.get(i), i < threshold ? TransactionSignature.dummy(getScriptType().getSignatureType(), SigHash.UNIFIED_ALL.value) : null);
             }
             txInput = getScriptType().addMultisigSpendingInput(getPolicyType(), transaction, prevTxOut, threshold, pubKeySignatures);
         }
@@ -1796,7 +1796,12 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
         if(psbt.getPsbtOutputs().stream().anyMatch(o -> o.getSilentPaymentAddress() != null)) {
             List<PSBTInput> psbtInputs = psbt.getPsbtInputs();
             for(int i = 0; i < psbtInputs.size(); i++) {
+                //Compare the base type: the unified opt-in commits to every input and every output, which
+                //is the property silent payments require, so it is as acceptable here as SIGHASH_ALL.
                 SigHash inputSigHash = psbtInputs.get(i).getSigHash();
+                if(inputSigHash != null) {
+                    inputSigHash = inputSigHash.withoutUnified();
+                }
                 if(inputSigHash != null && inputSigHash != SigHash.ALL && inputSigHash != SigHash.DEFAULT) {
                     throw new IllegalStateException("Silent payment outputs require SIGHASH_ALL/DEFAULT signatures. Input at index " + i + " has sighash type: " + inputSigHash);
                 }

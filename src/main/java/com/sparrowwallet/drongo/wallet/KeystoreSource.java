@@ -16,4 +16,9 @@ public enum KeystoreSource {
     public String getDisplayName() {
         return displayName;
     }
+
+    /** Whether the signing happens on a device rather than from a key this wallet holds. */
+    public boolean isHardware() {
+        return this == HW_USB || this == HW_AIRGAPPED;
+    }
 }

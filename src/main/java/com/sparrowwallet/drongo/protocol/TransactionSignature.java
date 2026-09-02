@@ -63,6 +63,19 @@ public class TransactionSignature {
         return new TransactionSignature(val, val, type);
     }
 
+    /**
+     * As above, sized for a signature carrying the given hash type.
+     *
+     * There is no opted-in form of SIGHASH_DEFAULT, so a Schnorr signature that opts in carries a hash type byte
+     * and encodes to 65 bytes rather than 64. An estimate built on the shorter one is under the real size, and at
+     * a fee rate near the relay minimum that is the difference between a transaction the node accepts and one it
+     * refuses with nothing in the wallet to say why. Overestimating costs a fraction of a satoshi an input.
+     */
+    public static TransactionSignature dummy(Type type, byte sighashFlags) {
+        BigInteger val = ECKey.HALF_CURVE_ORDER;
+        return new TransactionSignature(val, val, type, sighashFlags);
+    }
+
     public boolean anyoneCanPay() {
         return (sighashFlags & SigHash.ANYONECANPAY.value) != 0;
     }

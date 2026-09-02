@@ -8,6 +8,7 @@ import com.sparrowwallet.drongo.silentpayments.SilentPaymentsDLEQProof;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -195,7 +196,15 @@ public class PSBTInput {
                         throw new PSBTParseException("PSBT input sighash type must be 4 bytes");
                     }
                     long sighashType = Utils.readUint32(entry.getData(), 0);
-                    SigHash sigHash = SigHash.fromByte((byte)sighashType);
+                    SigHash sigHash;
+                    try {
+                        sigHash = SigHash.fromByte((byte)sighashType);
+                    } catch(IllegalArgumentException e) {
+                        //Consensus accepts any byte for bare, P2SH and segwit v0, so a PSBT can legitimately
+                        //declare a type this enum does not model. Report it as a parse failure rather than
+                        //letting an unchecked exception escape a constructor that declares PSBTParseException.
+                        throw new PSBTParseException("Input " + index + " declares unsupported sighash type 0x" + Long.toHexString(sighashType));
+                    }
                     this.sigHash = sigHash;
                     log.debug("Found input sighash_type " + sigHash.toString());
                     break;
@@ -982,6 +991,11 @@ public class PSBTInput {
     }
 
     void verifySigHash() throws PSBTSignatureException {
+        //The opt-in bit selects an algorithm, not what the signature covers, so an opted-in type is as
+        //safe or unsafe as the type it is built on and has to reach the same warning. Stripping it here
+        //means a new opt-in constant can never quietly bypass this gate.
+        SigHash sigHash = (this.sigHash == null ? null : this.sigHash.withoutUnified());
+
         if(sigHash == null || sigHash == SigHash.ALL || sigHash == SigHash.DEFAULT) {
             return;
         }
@@ -1168,7 +1182,11 @@ public class PSBTInput {
         Sha256Hash hash;
 
         ScriptType scriptType = getScriptType();
-        if(scriptType == ScriptType.P2TR) {
+        //The unified algorithm covers every script type, so it is selected by the opt-in bit rather than
+        //by the input's kind. The kind only decides which script type byte and tail the message carries.
+        if(localSigHash != null && localSigHash.isUnified()) {
+            hash = getHashForUnifiedSignature(connectedScript, localSigHash.value, scriptType);
+        } else if(scriptType == ScriptType.P2TR) {
             List<TransactionOutput> spentUtxos = psbt.getPsbtInputs().stream().map(PSBTInput::getUtxo).collect(Collectors.toList());
             hash = psbt.getTransaction().hashForTaprootSignature(spentUtxos, index, !P2TR.isScriptType(connectedScript), connectedScript, localSigHash, null);
         } else if(Arrays.asList(WITNESS_TYPES).contains(scriptType)) {
@@ -1180,4 +1198,41 @@ public class PSBTInput {
 
         return hash;
     }
+
+    private Sha256Hash getHashForUnifiedSignature(Script connectedScript, byte sigHashType, ScriptType scriptType) {
+        //Every spent output is committed to, not just this input's, which is what closes CVE-2020-14199.
+        //PSBT already carries them per input.
+        List<TransactionOutput> spentUtxos = psbt.getPsbtInputs().stream().map(PSBTInput::getUtxo).collect(Collectors.toList());
+
+        UnifiedScriptType unifiedScriptType;
+        byte[] scriptCode = null;
+        byte[] tapLeafHash = null;
+        if(scriptType == ScriptType.P2TR) {
+            if(P2TR.isScriptType(connectedScript)) {
+                unifiedScriptType = UnifiedScriptType.TAPROOT;
+            } else {
+                unifiedScriptType = UnifiedScriptType.TAPSCRIPT;
+                tapLeafHash = getTapLeafHash(connectedScript);
+            }
+        } else if(Arrays.asList(WITNESS_TYPES).contains(scriptType)) {
+            unifiedScriptType = UnifiedScriptType.WITNESS_V0;
+            scriptCode = connectedScript.getProgram();
+        } else {
+            unifiedScriptType = UnifiedScriptType.BARE;
+            scriptCode = connectedScript.getProgram();
+        }
+
+        return psbt.getTransaction().hashForUnifiedSignature(spentUtxos, index, unifiedScriptType, scriptCode, sigHashType, null, tapLeafHash, null);
+    }
+
+    private byte[] getTapLeafHash(Script leafScript) {
+        byte[] program = leafScript.getProgram();
+        ByteArrayOutputStream leafStream = new ByteArrayOutputStream();
+        leafStream.write(Transaction.LEAF_VERSION_TAPSCRIPT);
+        leafStream.writeBytes(new VarInt(program.length).encode());
+        leafStream.writeBytes(program);
+
+        return Utils.taggedHash("TapLeaf", leafStream.toByteArray());
+    }
+
 }
