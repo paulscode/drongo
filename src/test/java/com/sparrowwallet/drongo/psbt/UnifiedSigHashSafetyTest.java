@@ -205,4 +205,65 @@ public class UnifiedSigHashSafetyTest {
                 "A legacy signature must still verify when the input declares the opt-in");
     }
 
+
+    private PSBT signedTaprootPsbt(SigHash sigHash) {
+        Script spk = ScriptType.P2TR.getOutputScript(PolicyType.SINGLE_HD, KEY);
+        Transaction transaction = new Transaction();
+        transaction.setVersion(2);
+        transaction.addInput(Sha256Hash.wrap(Utils.hexToBytes("bb".repeat(32))), 0, new Script(new byte[0]));
+        transaction.addOutput(90000L, spk);
+
+        PSBT psbt = new PSBT(transaction);
+        PSBTInput psbtInput = psbt.getPsbtInputs().getFirst();
+        psbtInput.setWitnessUtxo(new TransactionOutput(null, 100000L, spk.getProgram()));
+        psbtInput.setSigHash(sigHash);
+        psbtInput.sign(ScriptType.P2TR.getOutputKey(PolicyType.SINGLE_HD, KEY));
+        return psbt;
+    }
+
+    /**
+     * An opted-in taproot spend, signed and read back.
+     *
+     * The digest vectors cover taproot, but nothing covered signing one. A Schnorr signature carries no hash
+     * type byte for SIGHASH_DEFAULT and one byte for anything else, so an opted-in taproot signature encodes
+     * to 65 bytes rather than 64. Getting that wrong is not a wrong digest, which is what the vectors would
+     * catch; it is a signature of the wrong length, which reads back as the wrong hash type or not at all.
+     */
+    @Test
+    public void testAnOptedInTaprootSignatureRoundTrips() throws PSBTParseException {
+        PSBT parsed = new PSBT(signedTaprootPsbt(SigHash.UNIFIED_ALL).serialize());
+        PSBTInput psbtInput = parsed.getPsbtInputs().getFirst();
+
+        TransactionSignature signature = psbtInput.getTapKeyPathSignature();
+        Assertions.assertNotNull(signature, "The opted-in taproot signature did not survive serialisation");
+        Assertions.assertEquals(SigHash.UNIFIED_ALL.byteValue(), signature.sighashFlags);
+        Assertions.assertEquals(65, signature.encodeToBitcoin().length,
+                "An opted-in Schnorr signature carries its hash type byte, so it is 65 bytes");
+        Assertions.assertEquals(SigHash.UNIFIED_ALL, psbtInput.getSigHash());
+    }
+
+    /**
+     * And the default taproot spend still omits the byte, so the above cannot have made every Schnorr
+     * signature a byte longer and quietly raised the size of every taproot transaction.
+     */
+    @Test
+    public void testADefaultTaprootSignatureStillOmitsTheByte() throws PSBTParseException {
+        PSBT parsed = new PSBT(signedTaprootPsbt(SigHash.DEFAULT).serialize());
+        TransactionSignature signature = parsed.getPsbtInputs().getFirst().getTapKeyPathSignature();
+        Assertions.assertNotNull(signature);
+        Assertions.assertEquals(64, signature.encodeToBitcoin().length,
+                "A SIGHASH_DEFAULT Schnorr signature appends no hash type byte");
+    }
+
+    /**
+     * The opted-in taproot signature must verify against the message it was made for, which is the check
+     * the digest vectors cannot make: they compare a hash, not a signature over it.
+     */
+    @Test
+    public void testAnOptedInTaprootSignatureVerifies() throws Exception {
+        PSBT parsed = new PSBT(signedTaprootPsbt(SigHash.UNIFIED_ALL).serialize());
+        Assertions.assertTrue(parsed.getPsbtInputs().getFirst().verifySignatures(),
+                "An opted-in taproot signature must verify under the unified message");
+    }
+
 }
