@@ -1031,17 +1031,21 @@ public class PSBTInput {
         if(getNonWitnessUtxo() != null || getWitnessUtxo() != null) {
             Script signingScript = getSigningScript();
             if(signingScript != null) {
-                Sha256Hash hash = getHashForSignature(signingScript, localSigHash);
-
+                //Each signature is checked under the hash type it carries, not under the one the input
+                //declares. The two agree while one wallet builds and signs the whole transaction, and stop
+                //agreeing as soon as signatures from more than one source are combined: an opted-in signer
+                //and a signer handed the base type commit to different messages, which is the arrangement
+                //the opt-in exists to allow. Verifying both against the declaration rejected whichever of
+                //them disagreed with it, and rejected the PSBT with it.
                 if(isTaproot() && tapKeyPathSignature != null) {
                     ECKey outputKey = P2TR.getPublicKeyFromScript(getUtxo().getScript());
-                    if(!outputKey.verify(hash, tapKeyPathSignature)) {
+                    if(!outputKey.verify(hashForSignatureType(signingScript, tapKeyPathSignature, localSigHash), tapKeyPathSignature)) {
                         throw new PSBTSignatureException("Tweaked internal key does not verify against provided taproot keypath signature");
                     }
                 } else {
                     for(ECKey sigPublicKey : getPartialSignatures().keySet()) {
                         TransactionSignature signature = getPartialSignature(sigPublicKey);
-                        if(!sigPublicKey.verify(hash, signature)) {
+                        if(!sigPublicKey.verify(hashForSignatureType(signingScript, signature, localSigHash), signature)) {
                             throw new PSBTSignatureException("Partial signature does not verify against provided public key");
                         }
                     }
@@ -1233,6 +1237,27 @@ public class PSBTInput {
         leafStream.writeBytes(program);
 
         return Utils.taggedHash("TapLeaf", leafStream.toByteArray());
+    }
+
+
+    /**
+     * The message a given signature commits to, read from the signature's own hash type byte.
+     *
+     * Falls back to the type the input declares when that byte is one this enum does not model. Consensus
+     * accepts any byte for bare, P2SH and segwit v0, so such a signature is not necessarily malformed, and
+     * guessing a type for it here would check it against a message nobody signed. Declining to check is not
+     * an option either: this returns a hash, and throwing out of a verification would refuse the whole PSBT
+     * over one signature. Falling back leaves that case exactly as it behaved before the opt-in existed.
+     */
+    private Sha256Hash hashForSignatureType(Script connectedScript, TransactionSignature signature, SigHash declared) {
+        SigHash sigHash;
+        try {
+            sigHash = SigHash.fromByte(signature.sighashFlags);
+        } catch(IllegalArgumentException e) {
+            sigHash = declared;
+        }
+
+        return getHashForSignature(connectedScript, sigHash);
     }
 
 }

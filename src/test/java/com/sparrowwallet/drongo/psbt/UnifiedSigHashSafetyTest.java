@@ -169,4 +169,40 @@ public class UnifiedSigHashSafetyTest {
         }
         return -1;
     }
+
+    /**
+     * A signature must be verified under the hash type IT carries, not under the one the input declares.
+     *
+     * verifySignatures computed a single hash from the input's declared type and checked every partial
+     * signature against it. That holds while one wallet builds and signs the whole transaction, and stops
+     * holding the moment signatures from more than one source are combined: an opted-in signer and a signer
+     * that was handed the base type produce signatures under different messages, which is the arrangement
+     * this feature exists to allow. Whichever of them disagreed with the declaration failed to verify and
+     * the PSBT was rejected outright.
+     */
+    @Test
+    public void testASignatureIsVerifiedUnderItsOwnHashType() throws Exception {
+        PSBT psbt = signedPsbt(SigHash.UNIFIED_ALL);
+        PSBTInput psbtInput = psbt.getPsbtInputs().getFirst();
+        Assertions.assertEquals(SigHash.UNIFIED_ALL.byteValue(),
+                psbtInput.getPartialSignatures().values().iterator().next().sighashFlags);
+
+        //What a combine produces: the signature opted in, the declaration says otherwise.
+        psbtInput.setSigHash(SigHash.ALL);
+        Assertions.assertTrue(psbtInput.verifySignatures(),
+                "An opted-in signature must still verify when the input declares the base type");
+    }
+
+    /**
+     * And the same the other way round, so the fix cannot have simply swapped which one is trusted.
+     */
+    @Test
+    public void testALegacySignatureVerifiesUnderADeclaredOptIn() throws Exception {
+        PSBT psbt = signedPsbt(SigHash.ALL);
+        PSBTInput psbtInput = psbt.getPsbtInputs().getFirst();
+        psbtInput.setSigHash(SigHash.UNIFIED_ALL);
+        Assertions.assertTrue(psbtInput.verifySignatures(),
+                "A legacy signature must still verify when the input declares the opt-in");
+    }
+
 }
