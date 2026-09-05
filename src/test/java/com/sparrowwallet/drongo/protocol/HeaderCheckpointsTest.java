@@ -129,6 +129,38 @@ public class HeaderCheckpointsTest {
         Assertions.assertNotNull(Network.MAINNET.getHeaderCheckpoints().getHash(2015));
     }
 
+    /**
+     * The mainnet pin list must stop at the last block both chains share.
+     *
+     * Bitcoin's mainnet split at height 961632. A pin above that names one side of the split, and for this fork it would name the
+     * SHA256d side: a hash the BLAKE2b chain has never seen. The header store starts at the last pin, so pinning above the split
+     * makes the BLAKE2b chain unverifiable rather than merely unpinned. 961631 is the last block on both, so it is correct for either.
+     *
+     * This is pinned by a test because nothing else catches it. Upstream extends this file every feature release and its own tests
+     * are written relative to getMaxHeight(), so they stay green at any length. Since the upstream merge that brought in
+     * "refuse an announced tip below the last pinned header", getMaxHeight() also decides which announced tips are refused
+     * outright, so a silently re-extended list would start rejecting the chain this fork exists to follow.
+     */
+    @Test
+    public void testMainnetCheckpointsStopAtTheLastSharedBlock() {
+        int lastSharedBlock = 961631;
+        int splitHeight = 961632;
+
+        int maxHeight = Network.MAINNET.getHeaderCheckpoints().getMaxHeight();
+
+        Assertions.assertEquals(lastSharedBlock, maxHeight,
+                "mainnet checkpoints must pin " + lastSharedBlock + ", the last block the SHA256d and BLAKE2b chains share");
+        Assertions.assertTrue(maxHeight < splitHeight,
+                "a pin at or above the split at " + splitHeight + " names one side of it and makes the other unverifiable");
+
+        // The pin must be a real entry, not an artefact of an empty or short-read list.
+        Assertions.assertNotNull(Network.MAINNET.getHeaderCheckpoints().getHash(maxHeight));
+
+        // And the list must not carry anything above it.
+        Assertions.assertThrows(IllegalArgumentException.class,
+                () -> Network.MAINNET.getHeaderCheckpoints().getHash(maxHeight + HeaderChainState.RETARGET_INTERVAL));
+    }
+
     private static HeaderCheckpoints parse(String content) throws IOException {
         return HeaderCheckpoints.parse(Network.MAINNET, new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8)));
     }
