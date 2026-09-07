@@ -6,10 +6,13 @@ import com.sparrowwallet.drongo.policy.PolicyType;
 import com.sparrowwallet.drongo.protocol.*;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 /**
  * A claim about replay protection has to be counted from signatures, not from things shaped like them.
@@ -135,6 +138,55 @@ public class VerifiedSignatureOptInTest {
         Assertions.assertEquals(1, verified.size(), "the legacy signature still verifies, under its own type");
         Assertions.assertEquals(0, verified.values().iterator().next().sighashFlags & SigHash.UNIFIED_FLAG,
                 "and it must not read as an opt-in merely because the input declared one");
+    }
+
+    /**
+     * A file cannot make this run away, and it runs on the thread drawing the screen.
+     *
+     * <p>A witness is a list whose length the file chooses, and every 64 or 65 byte push in it reads as a
+     * signature, so the file decides how many verifications are attempted. Two things bound that: the
+     * digest is cached per hash type, since it depends on the type and the transaction but never on the
+     * key being tried, and the number of pushes read and checks made is capped.
+     *
+     * <p>What this asserts is that the call returns, not that it is fast. Measured on the pathological
+     * input below, the bound is worth about 8x (68ms against 561ms), which is a real saving and nowhere
+     * near a threshold worth asserting on whatever machine CI happens to give us. The reason the gap is
+     * not larger is worth writing down: a hash type byte the file invents is usually not a valid SigHash,
+     * and an invalid one falls back to the type the input declares, so those collapse onto one cached
+     * digest instead of forcing 256 walks of the transaction. The bounds are cheap insurance against that
+     * reasoning being wrong somewhere, rather than the thing holding this up.
+     */
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    @Test
+    public void aWitnessStuffedWithSignatureShapedPushesCannotRunAway() {
+        Script spk = ScriptType.P2WPKH.getOutputScript(PolicyType.SINGLE_HD, KEY);
+        Transaction transaction = new Transaction();
+        transaction.setVersion(2);
+        //Large enough that hashing it once is measurable, so 256 walks of it would not be
+        for(int i = 0; i < 400; i++) {
+            transaction.addInput(Sha256Hash.wrap(Utils.hexToBytes(String.format("%064x", i))), 0, new Script(new byte[0]));
+            transaction.addOutput(1000L + i, spk);
+        }
+
+        PSBT psbt = new PSBT(transaction);
+        PSBTInput psbtInput = psbt.getPsbtInputs().getFirst();
+        psbtInput.setWitnessUtxo(new TransactionOutput(null, 100000L, spk.getProgram()));
+
+        List<byte[]> pushes = new ArrayList<>();
+        for(int i = 0; i < 4000; i++) {
+            byte[] push = new byte[65];
+            push[0] = (byte)0xc0;
+            push[1] = (byte)(i & 0xff);
+            push[2] = (byte)((i >> 8) & 0xff);
+            //Every hash type the byte can hold, so the cache cannot absorb them
+            push[64] = (byte)(i & 0xff);
+            pushes.add(push);
+        }
+        psbtInput.setFinalScriptWitness(new TransactionWitness(null, pushes));
+
+        Map<ECKey, TransactionSignature> verified = psbtInput.getVerifiedSignatures(Set.of(outputKey(KEY), outputKey(OTHER_KEY)));
+
+        Assertions.assertTrue(verified.isEmpty(), "none of it is a signature, so none of it counts");
     }
 
     /**

@@ -1082,6 +1082,15 @@ public class PSBTInput {
      * @param availableKeys keys the caller derived itself
      * @return the verified signatures, by the key that made each
      */
+    /**
+     * How many pushes an input is worth reading as signatures, and how many verifications one input may
+     * ask for. A witness is a list the file chooses the length of, and every 64 or 65 byte push in it
+     * reads as a signature, so both are bounds on work a hostile PSBT could otherwise demand from a
+     * thread that is also drawing the screen. Real inputs are far below either.
+     */
+    private static final int MAX_SIGNATURES_CHECKED = 64;
+    private static final int MAX_VERIFICATIONS = 256;
+
     public Map<ECKey, TransactionSignature> getVerifiedSignatures(Set<ECKey> availableKeys) {
         Map<ECKey, TransactionSignature> verified = new LinkedHashMap<>();
 
@@ -1095,16 +1104,52 @@ public class PSBTInput {
             return verified;
         }
 
+        //Read once. getSignatures parses the witness, and a caller with several keys would otherwise
+        //re-parse it for each of them.
+        List<TransactionSignature> signatures = new ArrayList<>(getSignatures());
+        if(signatures.size() > MAX_SIGNATURES_CHECKED) {
+            //A witness is a list of pushes, and any 64 or 65 byte push reads as a signature, so the number
+            //of them is the file's to choose. Past this there is nothing left to learn: a real input does
+            //not carry this many, and what is not checked is reported as unchecked rather than as absent.
+            signatures = signatures.subList(0, MAX_SIGNATURES_CHECKED);
+        }
+
         SigHash declared = getSigHash() == null ? getDefaultSigHash() : getSigHash();
-        for(ECKey availableKey : availableKeys) {
-            if(availableKey == null) {
+
+        //Cached per hash type, not per pair. The digest depends on the signature's type and on the
+        //transaction, never on the key being tried, and for the legacy types computing it walks the whole
+        //transaction. Without this, a multisig wallet re-walked it once per key per signature, which is the
+        //cost a hostile PSBT would have been choosing for a thread that is also drawing the screen.
+        Map<Byte, Sha256Hash> hashes = new HashMap<>();
+        int checks = 0;
+
+        for(TransactionSignature signature : signatures) {
+            Sha256Hash hash;
+            try {
+                hash = hashes.computeIfAbsent(signature.sighashFlags,
+                        _ -> hashForSignatureType(signingScript, signature, declared));
+            } catch(Exception e) {
+                //A hash type this input cannot be hashed under. Nothing verifies against it.
                 continue;
             }
 
-            for(TransactionSignature signature : getSignatures()) {
+            if(hash == null) {
+                continue;
+            }
+
+            for(ECKey availableKey : availableKeys) {
+                if(availableKey == null) {
+                    continue;
+                }
+                if(++checks > MAX_VERIFICATIONS) {
+                    return verified;
+                }
+
                 try {
-                    if(availableKey.verify(hashForSignatureType(signingScript, signature, declared), signature)) {
+                    if(availableKey.verify(hash, signature)) {
                         verified.put(availableKey, signature);
+                        //One key made it; the rest did not, and a signature is counted once
+                        break;
                     }
                 } catch(Exception e) {
                     //Something shaped like a signature that is not one. That is the case this exists to
