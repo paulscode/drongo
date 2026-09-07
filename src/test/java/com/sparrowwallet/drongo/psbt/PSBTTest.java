@@ -2,6 +2,7 @@ package com.sparrowwallet.drongo.psbt;
 
 import com.sparrowwallet.drongo.ExtendedKey;
 import com.sparrowwallet.drongo.KeyDerivation;
+import com.sparrowwallet.drongo.KeyPurpose;
 import com.sparrowwallet.drongo.Network;
 import com.sparrowwallet.drongo.Utils;
 import com.sparrowwallet.drongo.address.P2PKHAddress;
@@ -11,7 +12,12 @@ import com.sparrowwallet.drongo.policy.Policy;
 import com.sparrowwallet.drongo.policy.PolicyType;
 import com.sparrowwallet.drongo.protocol.*;
 import com.sparrowwallet.drongo.silentpayments.SilentPaymentAddress;
+import com.sparrowwallet.drongo.wallet.BlockTransaction;
+import com.sparrowwallet.drongo.wallet.DeterministicSeed;
+import com.sparrowwallet.drongo.wallet.Keystore;
+import com.sparrowwallet.drongo.wallet.MnemonicException;
 import com.sparrowwallet.drongo.wallet.Wallet;
+import com.sparrowwallet.drongo.wallet.WalletNode;
 import org.bouncycastle.util.encoders.Hex;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
@@ -20,6 +26,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -1508,6 +1515,61 @@ public class PSBTTest {
     }
 
     @Test
+    public void verifyCombinedSignaturesRejectsSilentPaymentScriptReplacement() {
+        SilentPaymentAddress silentPaymentAddress = new SilentPaymentAddress(new ECKey(), new ECKey());
+        Script resolvedScript = new Script(Utils.hexToBytes("5120aa00000000000000000000000000000000000000000000000000000000000011"));
+        Script replacementScript = new Script(Utils.hexToBytes("5120bb00000000000000000000000000000000000000000000000000000000000022"));
+
+        PSBT localPsbt = buildSilentPaymentPsbt(silentPaymentAddress, resolvedScript);
+        PSBT replacementPsbt = buildSilentPaymentPsbt(silentPaymentAddress, replacementScript);
+
+        //Both PSBTs represent the same transaction, since a silent payment output is identified by its address rather than its resolved script
+        Assertions.assertTrue(localPsbt.matches(replacementPsbt));
+
+        PSBTSignatureException ex = Assertions.assertThrows(PSBTSignatureException.class,
+                () -> localPsbt.verifyCombinedSignatures(replacementPsbt));
+        Assertions.assertTrue(ex.getMessage().contains("Combined PSBT would change the script of the output at index 0"));
+
+        Assertions.assertEquals(resolvedScript, localPsbt.getPsbtOutputs().getFirst().getScript(),
+                "local PSBT must be unchanged when verifyCombinedSignatures rejects the combine");
+    }
+
+    @Test
+    public void verifyCombinedSignaturesAcceptsSilentPaymentScriptResolution() throws PSBTSignatureException {
+        SilentPaymentAddress silentPaymentAddress = new SilentPaymentAddress(new ECKey(), new ECKey());
+        Script resolvedScript = new Script(Utils.hexToBytes("5120aa00000000000000000000000000000000000000000000000000000000000011"));
+
+        PSBT localPsbt = buildSilentPaymentPsbt(silentPaymentAddress, null);
+        PSBT resolvedPsbt = buildSilentPaymentPsbt(silentPaymentAddress, resolvedScript);
+
+        localPsbt.verifyCombinedSignatures(resolvedPsbt);
+        localPsbt.combine(resolvedPsbt);
+
+        Assertions.assertEquals(resolvedScript, localPsbt.getPsbtOutputs().getFirst().getScript());
+    }
+
+    private PSBT buildSilentPaymentPsbt(SilentPaymentAddress silentPaymentAddress, Script outputScript) {
+        Script spk = new P2PKHAddress(Utils.hexToBytes("aa00000000000000000000000000000000000011")).getOutputScript();
+        Transaction prior = new Transaction();
+        prior.addInput(Sha256Hash.ZERO_HASH, 0L, new Script(new byte[0]));
+        prior.addOutput(100_000L, spk);
+
+        Transaction tx = new Transaction();
+        tx.addInput(prior.getTxId(), 0, new Script(new byte[0]));
+        tx.addOutput(90_000L, new Script(new byte[0]));
+
+        PSBT psbt = new PSBT(tx);
+        psbt.getPsbtInputs().getFirst().setNonWitnessUtxo(prior);
+        psbt.getPsbtOutputs().getFirst().setSilentPaymentAddress(silentPaymentAddress);
+        //An unresolved silent payment output keeps the empty script the transaction was created with
+        if(outputScript != null) {
+            psbt.getPsbtOutputs().getFirst().setScript(outputScript);
+        }
+
+        return psbt;
+    }
+
+    @Test
     public void verifySigHashesRejectsPlainSighashSingle() {
         ECKey key = new ECKey();
         Script spk = new P2PKHAddress(key.getPubKeyHash()).getOutputScript();
@@ -2053,6 +2115,59 @@ public class PSBTTest {
         PSBT psbt = new PSBT(buildSilentPaymentTransaction(new Script(new byte[0]), silentPaymentAmount, CHANGE_SCRIPT));
         SilentPaymentAddress silentPaymentAddress = new SilentPaymentAddress(new ECKey(), new ECKey());
         psbt.getPsbtOutputs().set(0, new PSBTOutput(psbt, 0, null, silentPaymentAmount, new Script(new byte[0]), null, null, Collections.emptyMap(), Collections.emptyMap(), null, silentPaymentAddress, null, null));
+        return psbt;
+    }
+
+    @Test
+    public void testFinalisedSigHashAllAttribution() throws MnemonicException {
+        Wallet wallet = buildSigningWallet();
+        PSBT psbt = signAndFinalise(wallet, SigHash.ALL);
+        Assertions.assertNull(psbt.getPsbtInputs().getFirst().getSigHash());
+        Assertions.assertEquals(1, wallet.getSignedKeystores(psbt).values().stream().mapToInt(Map::size).sum());
+    }
+
+    @Test
+    public void testFinalisedSigHashSingleAttribution() throws MnemonicException {
+        Wallet wallet = buildSigningWallet();
+        PSBT psbt = signAndFinalise(wallet, SigHash.SINGLE);
+        //Finalising clears PSBT_IN_SIGHASH_TYPE, so the hash type can only come from the signature itself
+        Assertions.assertNull(psbt.getPsbtInputs().getFirst().getSigHash());
+        Assertions.assertEquals(1, wallet.getSignedKeystores(psbt).values().stream().mapToInt(Map::size).sum());
+    }
+
+    private Wallet buildSigningWallet() throws MnemonicException {
+        String words = "absent essay fox snake vast pumpkin height crouch silent bulb excuse razor";
+        DeterministicSeed seed = new DeterministicSeed(words, "", 0, DeterministicSeed.Type.BIP39);
+        Wallet wallet = new Wallet();
+        wallet.setPolicyType(PolicyType.SINGLE_HD);
+        wallet.setScriptType(ScriptType.P2WPKH);
+        wallet.getKeystores().add(Keystore.fromSeed(seed, PolicyType.SINGLE_HD, ScriptType.P2WPKH.getDefaultDerivation()));
+        wallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE_HD, ScriptType.P2WPKH, wallet.getKeystores(), 1));
+        wallet.getNode(KeyPurpose.RECEIVE).fillToIndex(0);
+
+        return wallet;
+    }
+
+    private PSBT signAndFinalise(Wallet wallet, SigHash sigHash) throws MnemonicException {
+        WalletNode addressNode = wallet.getNode(KeyPurpose.RECEIVE).getChildren().iterator().next();
+        Script outputScript = wallet.getOutputScript(addressNode);
+
+        Transaction funding = new Transaction();
+        funding.addInput(Sha256Hash.ZERO_HASH, 0, new Script(new byte[0]));
+        funding.addOutput(100000, outputScript);
+        wallet.updateTransactions(Map.of(funding.getTxId(), new BlockTransaction(funding.getTxId(), 800000, new Date(), 0L, funding)));
+
+        Transaction spend = new Transaction();
+        spend.setVersion(2);
+        spend.addInput(funding.getTxId(), 0, new Script(new byte[0]));
+        spend.addOutput(90000, outputScript);
+
+        PSBT psbt = new PSBT(spend);
+        psbt.getPsbtInputs().getFirst().setWitnessUtxo(funding.getOutputs().getFirst());
+        psbt.getPsbtInputs().getFirst().setSigHash(sigHash);
+        wallet.sign(psbt);
+        wallet.finalise(psbt);
+
         return psbt;
     }
 
