@@ -69,6 +69,12 @@ public class UnifiedSigHashPSBTTest {
     /**
      * The signature must verify against the unified digest, which is what proves signing and verification
      * agree on which message was signed rather than only that a signature was produced.
+     *
+     * <p>Note what this cannot show. It signs and verifies down the same path, so if the unified digest
+     * were bypassed entirely both halves would use the other one and still agree: checked by disabling
+     * the opt-in branch, which leaves this test passing. A symmetric test cannot catch a symmetric
+     * error. {@link #testPsbtDigestMatchesTheAlgorithmDirectly()} is what catches it, by computing the
+     * digest independently, and is not redundant with this despite covering the same feature.
      */
     @Test
     public void testAnOptedInSignatureVerifies() {
