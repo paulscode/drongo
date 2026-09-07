@@ -111,6 +111,33 @@ public class VerifiedSignatureOptInTest {
     }
 
     /**
+     * A declaration is not a signature.
+     *
+     * <p>Marking a keystore says what its owner believes the signer does, and nothing verifies that. A
+     * signer handed a PSBT declaring the opt-in is free to return an ordinary signature, and the
+     * transaction then has no replay protection whatever the file says about itself. This matters more
+     * now that a watch-only keystore can be marked, where the signer is entirely outside the wallet.
+     *
+     * <p>The status is read off the signatures rather than the declaration. This pins that, because the
+     * cheaper reading is right there in the file and would be an easy thing to drift back to.
+     */
+    @Test
+    public void aDeclarationTheSignerIgnoredIsNotAnOptIn() {
+        PSBT psbt = signedPsbt(SigHash.ALL);
+        PSBTInput psbtInput = psbt.getPsbtInputs().getFirst();
+
+        //What a signer that ignored the mark leaves behind: the file claims the opt-in, the signature
+        //inside it was made the old way
+        psbtInput.setSigHash(SigHash.UNIFIED_ALL);
+        Assertions.assertEquals(SigHash.UNIFIED_ALL, psbtInput.getSigHash(), "the file declares the opt-in");
+
+        Map<ECKey, TransactionSignature> verified = psbtInput.getVerifiedSignatures(Set.of(outputKey(KEY)));
+        Assertions.assertEquals(1, verified.size(), "the legacy signature still verifies, under its own type");
+        Assertions.assertEquals(0, verified.values().iterator().next().sighashFlags & SigHash.UNIFIED_FLAG,
+                "and it must not read as an opt-in merely because the input declared one");
+    }
+
+    /**
      * Without a spent output there is no amount and no script to commit to, so nothing can be hashed and
      * nothing can be checked. That reads as no opt-in rather than as an unchecked one.
      */
