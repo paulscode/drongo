@@ -1060,6 +1060,62 @@ public class PSBTInput {
         return false;
     }
 
+    /**
+     * The signatures on this input that a supplied key actually made.
+     *
+     * <p>Unlike {@link #getSigningKeys(Set)} this hashes per signature rather than once from the
+     * declared type, so a transaction carrying both an opted-in signature and a legacy one is read
+     * correctly instead of losing whichever disagrees with the declaration. That arrangement is the
+     * whole point of an opt-in that is per signer.
+     *
+     * <p>Nothing here is taken from the PSBT except the signatures themselves: the caller supplies
+     * the keys, so the file cannot vouch for itself. Callers should supply keys they derive, for an
+     * input whose spent output they already matched.
+     *
+     * <p>This is what a claim about replay protection has to be counted from. Reading a hash type
+     * off a push in the witness is not enough: any 64 or 65 byte push decodes as a Schnorr signature
+     * whose hash type is its own last byte, so a taproot control block with a single merkle step, an
+     * uncompressed public key, or a stray push all read as signatures, and roughly half of them read
+     * as opted in. Verification is the only thing that separates a signature from something shaped
+     * like one.
+     *
+     * @param availableKeys keys the caller derived itself
+     * @return the verified signatures, by the key that made each
+     */
+    public Map<ECKey, TransactionSignature> getVerifiedSignatures(Set<ECKey> availableKeys) {
+        Map<ECKey, TransactionSignature> verified = new LinkedHashMap<>();
+
+        //Without a spent output there is no amount and no script to commit to, so nothing can be hashed
+        if(getNonWitnessUtxo() == null && getWitnessUtxo() == null) {
+            return verified;
+        }
+
+        Script signingScript = getSigningScript();
+        if(signingScript == null) {
+            return verified;
+        }
+
+        SigHash declared = getSigHash() == null ? getDefaultSigHash() : getSigHash();
+        for(ECKey availableKey : availableKeys) {
+            if(availableKey == null) {
+                continue;
+            }
+
+            for(TransactionSignature signature : getSignatures()) {
+                try {
+                    if(availableKey.verify(hashForSignatureType(signingScript, signature, declared), signature)) {
+                        verified.put(availableKey, signature);
+                    }
+                } catch(Exception e) {
+                    //Something shaped like a signature that is not one. That is the case this exists to
+                    //exclude, so it is not an error worth reporting: it simply does not count.
+                }
+            }
+        }
+
+        return verified;
+    }
+
     public Map<ECKey, TransactionSignature> getSigningKeys(Set<ECKey> availableKeys) {
         Collection<TransactionSignature> signatures = getSignatures();
         Script signingScript = getSigningScript();
