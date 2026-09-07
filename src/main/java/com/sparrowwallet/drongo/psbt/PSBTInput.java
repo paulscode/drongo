@@ -1063,10 +1063,17 @@ public class PSBTInput {
     /**
      * The signatures on this input that a supplied key actually made.
      *
-     * <p>Unlike {@link #getSigningKeys(Set)} this hashes per signature rather than once from the
-     * declared type, so a transaction carrying both an opted-in signature and a legacy one is read
-     * correctly instead of losing whichever disagrees with the declaration. That arrangement is the
-     * whole point of an opt-in that is per signer.
+     * <p>Close to {@link #getSigningKeys(Set)}, which upstream has since brought to the same reading:
+     * both hash per signature under the type it carries, and both cache that per type. A transaction
+     * holding an opted-in signature beside a legacy one commits to two different messages, which is
+     * the whole point of an opt-in that is per signer, and hashing once from the declared type loses
+     * whichever disagrees with it.
+     *
+     * <p>What is still separate is the work bound and the refusal to guess. This answers a screen,
+     * where the input may be hostile and under-reporting is safe, so it caps the pushes it reads and
+     * the checks it makes, and treats an input with no spent output as verifying nothing.
+     * getSigningKeys answers which keystores signed, where under-reporting would be a signing bug, so
+     * it stays unbounded. The two should not be merged into one for that reason.
      *
      * <p>Nothing here is taken from the PSBT except the signatures themselves: the caller supplies
      * the keys, so the file cannot vouch for itself. Callers should supply keys they derive, for an
@@ -1295,8 +1302,13 @@ public class PSBTInput {
         ScriptType scriptType = getScriptType();
         //The unified algorithm covers every script type, so it is selected by the opt-in bit rather than
         //by the input's kind. The kind only decides which script type byte and tail the message carries.
-        if(localSigHash != null && localSigHash.isUnified()) {
-            hash = getHashForUnifiedSignature(connectedScript, localSigHash.value, scriptType);
+        //
+        //Read off the byte rather than a SigHash, because upstream split this into two overloads and the
+        //work moved into the one that only has the byte. Testing the bit here is what SigHash.isUnified
+        //did, and it is now applied per signature, which is the point of that split: a transaction can
+        //hold an opted-in signature beside a legacy one, and each has to be hashed under its own type.
+        if((sigHashType & SigHash.UNIFIED_FLAG) != 0) {
+            hash = getHashForUnifiedSignature(connectedScript, sigHashType, scriptType);
         } else if(scriptType == ScriptType.P2TR) {
             List<TransactionOutput> spentUtxos = psbt.getPsbtInputs().stream().map(PSBTInput::getUtxo).collect(Collectors.toList());
             hash = psbt.getTransaction().hashForTaprootSignature(spentUtxos, index, !P2TR.isScriptType(connectedScript), connectedScript, sigHashType, null);
