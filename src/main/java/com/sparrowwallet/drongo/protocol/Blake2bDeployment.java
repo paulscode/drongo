@@ -55,6 +55,28 @@ public class Blake2bDeployment {
     }
 
     /**
+     * The block at {@link #activationHeight}, where this network's is settled, or null where it is not.
+     *
+     * <p>This is what names one chain rather than merely a chain that changed proof of work. Mainnet's two chains share a
+     * genesis block, so {@code genesis_hash} cannot tell them apart, and a v2 header only says the chain it came from
+     * forked, not which fork it is. The first block mined under BLAKE2b says both.
+     *
+     * <p>Only mainnet has one. Testnet4's activation height has moved with each release candidate, so a hash pinned there
+     * would be wrong at the next one and would refuse the very chain it is meant to identify; regtest activates wherever
+     * the node running it says. On those the header's own format is as far as identification goes.
+     */
+    public static Sha256Hash activationBlockHash(Network network) {
+        return network == Network.MAINNET ? MAINNET_ACTIVATION_BLOCK : null;
+    }
+
+    /**
+     * Mainnet's, read from the chain on 8 September 2026 and confirmed against a second, unrelated source: a Fulcrum
+     * server following the fork, and mempool.guide's API. Its predecessor is 961639, the last block mined under SHA256d.
+     */
+    private static final Sha256Hash MAINNET_ACTIVATION_BLOCK =
+            Sha256Hash.wrap("0000000000000050c1e5f69672f459293be14f46e5a494e7a8c8541396f18eeb");
+
+    /**
      * The target a block at the activation height is required to use, given what the ordinary rule produced.
      *
      * <p>A direct port of {@code ApplyBlake2bTargetShift} in Knots' {@code src/pow.cpp}. The proof of work changes
