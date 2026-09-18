@@ -130,6 +130,8 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
         childWallet.purposeNodes.clear();
         childWallet.transactions.clear();
         childWallet.detachedLabels.clear();
+        childWallet.silentPaymentAddresses.clear();
+        childWallet.walletTables.clear();
         childWallet.childWallets.clear();
         childWallet.storedBlockHeight = null;
         childWallet.gapLimit = standardAccount.getMinimumGapLimit();
@@ -754,7 +756,7 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
     public String getOutputDescriptor(WalletNode node) {
         if(policyType == PolicyType.SINGLE_HD || policyType == PolicyType.SINGLE_SP) {
             ECKey pubKey = node.getPubKey();
-            return scriptType.getOutputDescriptor(pubKey);
+            return scriptType.getOutputDescriptor(policyType, pubKey);
         } else if(policyType == PolicyType.MULTI_HD) {
             List<ECKey> pubKeys = node.getPubKeys();
             Script script = ScriptType.MULTISIG.getOutputScript(defaultPolicy.getNumSignaturesRequired(), pubKeys);
@@ -1165,7 +1167,7 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
                 outputs.add(new WalletTransaction.NonAddressOutput(output));
             }
 
-            double noChangeVSize = transaction.getVirtualSize();
+            double noChangeVSize = WalletTransaction.getVirtualSize(transaction, outputs);
             long noChangeFeeRequiredAmt = params.getRequiredFeeAmount(noChangeVSize);
 
             //Add 1 satoshi to accommodate longer signatures when feeRate equals the current or common min relay fee to ensure fee is sufficient for maximum "relayability"
@@ -1203,12 +1205,12 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
 
             //Determine if a change output is required by checking if its value exceeds both the cost of change and the relay dust threshold
             List<Long> setChangeAmts = getSetChangeAmounts(selectedUtxoSets, totalPaymentAmount, noChangeFeeRequiredAmt);
-            double noChangeFeeRate = (params.fee() == null ? params.feeRate() : noChangeFeeRequiredAmt / transaction.getVirtualSize());
+            double noChangeFeeRate = (params.fee() == null ? params.feeRate() : noChangeFeeRequiredAmt / noChangeVSize);
             TransactionOutput changeOutput = new TransactionOutput(transaction, setChangeAmts.getFirst(), getNode(KeyPurpose.CHANGE).getOutputScript());
             long costOfChangeAmt = getCostOfChange(noChangeFeeRate, params.longTermFeeRate());
             long dustThresholdAmt = getDustThreshold(changeOutput, Transaction.DUST_RELAY_TX_FEE);
             long minChangeAmt = Math.max(costOfChangeAmt, dustThresholdAmt);
-            if(setChangeAmts.stream().allMatch(amt -> amt > minChangeAmt) || (numSets > 1 && differenceAmt / transaction.getVirtualSize() > noChangeFeeRate * 2)) {
+            if(setChangeAmts.stream().allMatch(amt -> amt > minChangeAmt) || (numSets > 1 && differenceAmt / noChangeVSize > noChangeFeeRate * 2)) {
                 //Change output is required, determine new fee once change output has been added
                 double changeVSize = noChangeVSize + changeOutput.getLength() * numSets;
                 long changeFeeRequiredAmt = params.getRequiredFeeAmount(changeVSize);
@@ -1244,7 +1246,8 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
 
                 if(setChangeAmts.stream().anyMatch(amt -> amt < minChangeAmt)) {
                     //The new fee has meant that one of the change outputs is now dust. We pay too high a fee without change, but change is dust when added.
-                    if(numSets > 1 && differenceAmt / transaction.getVirtualSize() < noChangeFeeRate * 2) {
+                    //Recomputed rather than reusing noChangeVSize above, the change outputs having since been added
+                    if(numSets > 1 && differenceAmt / WalletTransaction.getVirtualSize(transaction, outputs) < noChangeFeeRate * 2) {
                         //Maximize privacy. Pay a higher fee to keep multiple output sets.
                         return new WalletTransaction(this, transaction, params.utxoSelectors(), selectedUtxoSets, txPayments, outputs, differenceAmt);
                     } else {
@@ -1897,8 +1900,8 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
     /**
      * Verifies that the silent payment output scripts already resolved in the given PSBT are derived from the claimed silent payment addresses,
      * as proven by the PSBT's BIP-375 ECDH shares and DLEQ proofs against the public keys of this wallet's inputs.
-     * Verification is skipped only while every silent payment output is still unresolved, since the BIP-352 index of the outputs sharing a scan key is
-     * taken from the resolved scripts alone - a partially resolved set is rejected rather than verified.
+     * Verification is skipped only while every silent payment output is still unresolved and nothing has yet signed over them, since the BIP-352 index
+     * of the outputs sharing a scan key is taken from the resolved scripts alone - a partially resolved set is rejected rather than verified.
      * Since a resolved script is not part of the transaction the PSBT represents, an unproven script must be rejected before a signature commits to it.
      *
      * @param psbt the PSBT to verify
@@ -1910,6 +1913,14 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
         //An unresolved silent payment output has an omitted or empty script, and any other script must be proven whether or not it parses as an address
         long resolved = silentOutputs.stream().filter(psbtOutput -> psbtOutput.getScript() != null && !psbtOutput.getScript().isEmpty()).count();
         if(resolved == 0) {
+            //An unresolved set is what a wallet hands a signer to compute, so it is only a problem once something has signed over it: a signature
+            //commits to the output scripts, and one made while they are still empty can never be valid. Refusing it here keeps such a PSBT from being
+            //combined, saved or exported, where the check made when the transaction is extracted would refuse only the broadcast
+            if(!silentOutputs.isEmpty() && psbt.getPsbtInputs().stream().anyMatch(psbtInput -> !psbtInput.getPartialSignatures().isEmpty()
+                    || psbtInput.getTapKeyPathSignature() != null || psbtInput.isFinalized())) {
+                throw new InvalidSilentPaymentException("Signatures cannot commit to silent payment outputs that have not been computed");
+            }
+
             return;
         }
 
@@ -2415,11 +2426,13 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
         }
         copy.setWalletConfig(walletConfig == null ? null : walletConfig.copy());
         copy.setMixConfig(mixConfig == null ? null : mixConfig.copy());
+        copy.walletTables.putAll(walletTables);
         copy.setStoredBlockHeight(getStoredBlockHeight());
         copy.gapLimit = gapLimit;
         copy.watchLast = watchLast;
         copy.birthDate = birthDate;
         copy.birthHeight = birthHeight;
+        copy.silentPaymentAddresses.putAll(silentPaymentAddresses);
 
         return copy;
     }

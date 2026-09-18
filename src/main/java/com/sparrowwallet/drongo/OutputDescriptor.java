@@ -526,11 +526,15 @@ public class OutputDescriptor {
             descriptor = descriptor.substring(0, annotationStart);
         }
 
-        if(descriptor.toLowerCase(Locale.ROOT).startsWith("sp(")) {
+        if(isSilentPaymentDescriptor(descriptor)) {
             return parseSilentPaymentDescriptor(descriptor, annotations);
         }
 
         ScriptType scriptType = ScriptType.fromDescriptor(descriptor);
+        if(scriptType == ScriptType.P2TR && descriptor.substring(scriptType.getDescriptor().length()).matches("(?s).*[,(].*")) {
+            //Only key path taproot wallets are supported, and a key expression cannot contain a comma or parenthesis, so anything else is a script tree or expression
+            throw new IllegalArgumentException("Taproot descriptors with script path spends are not supported");
+        }
         if(scriptType == null) {
             ExtendedKey.Header header = ExtendedKey.Header.fromExtendedKey(descriptor);
             scriptType = header.getDefaultScriptType();
@@ -627,8 +631,12 @@ public class OutputDescriptor {
         return new OutputDescriptor(scriptType, Math.max(multisigThreshold, 1), keyDerivationMap, keyChildDerivationMap, mapExtendedPublicKeyLabels, masterPrivateKeyMap, annotations);
     }
 
+    public static boolean isSilentPaymentDescriptor(String descriptor) {
+        return descriptor.toLowerCase(Locale.ROOT).startsWith("sp(");
+    }
+
     private static OutputDescriptor parseSilentPaymentDescriptor(String descriptor, Map<String, Integer> annotations) {
-        if(!descriptor.startsWith("sp(") || !descriptor.endsWith(")")) {
+        if(!isSilentPaymentDescriptor(descriptor) || !descriptor.endsWith(")")) {
             throw new IllegalArgumentException("Invalid sp() descriptor format");
         }
         String inner = descriptor.substring(3, descriptor.length() - 1);

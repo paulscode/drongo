@@ -80,7 +80,7 @@ public class TransactionSignature {
         return (sighashFlags & SigHash.ANYONECANPAY.value) != 0;
     }
 
-    private SigHash getSigHash() {
+    public SigHash getSigHash() {
         if(sighashFlags == SigHash.DEFAULT.byteValue()) {
             return SigHash.DEFAULT;
         }

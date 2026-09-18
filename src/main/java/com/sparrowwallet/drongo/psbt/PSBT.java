@@ -168,9 +168,7 @@ public class PSBT {
             Map<ECKey, KeyDerivation> spSpendDerivations = new LinkedHashMap<>();
             for(Keystore keystore : signingWallet.getKeystores()) {
                 if(silentPaymentsTweak != null && keystore.getSilentPaymentScanAddress() != null && signingWallet.getPolicyType() == PolicyType.SINGLE_SP) {
-                    ECKey spendPubKey = keystore.getSilentPaymentScanAddress().getSpendKey();
-                    KeyDerivation spendKeyDerivation = new KeyDerivation(keystore.getKeyDerivation().getMasterFingerprint(), KeyDerivation.writePath(KeyDerivation.getBip352SpendDerivation(keystore.getKeyDerivation().getDerivation())));
-                    spSpendDerivations.put(spendPubKey, spendKeyDerivation);
+                    putSilentPaymentsSpendDerivation(keystore, spSpendDerivations);
                 } else {
                     derivedPublicKeys.put(signingWallet.getScriptType().getOutputKey(signingWallet.getPolicyType(), keystore.getPubKey(walletNode)), keystore.getKeyDerivation().extend(walletNode.getDerivation()));
                     if(signingWallet.getScriptType() == ScriptType.P2TR) {
@@ -647,6 +645,12 @@ public class PSBT {
         return fee;
     }
 
+    private static void putSilentPaymentsSpendDerivation(Keystore keystore, Map<ECKey, KeyDerivation> spendDerivations) {
+        ECKey spendPubKey = keystore.getSilentPaymentScanAddress().getSpendKey();
+        KeyDerivation spendKeyDerivation = new KeyDerivation(keystore.getKeyDerivation().getMasterFingerprint(), KeyDerivation.writePath(KeyDerivation.getBip352SpendDerivation(keystore.getKeyDerivation().getDerivation())));
+        spendDerivations.put(spendPubKey, spendKeyDerivation);
+    }
+
     public void addKeyPathInformation(Wallet signingWallet) {
         List<PSBTInput> missingKeyPathInputs = new ArrayList<>();
         for(PSBTInput psbtInput : getPsbtInputs()) {
@@ -663,11 +667,11 @@ public class PSBT {
             for(PSBTInput psbtInput : missingKeyPathInputs) {
                 WalletNode walletNode = signingNodes.get(psbtInput);
                 if(walletNode != null && walletNode.getWallet() != null) {
+                    byte[] silentPaymentsTweak = walletNode.getSilentPaymentTweak() != null ? walletNode.getSilentPaymentTweak() : psbtInput.getSilentPaymentsTweak();
                     for(Keystore keystore : signingWallet.getKeystores()) {
-                        if(psbtInput.getSilentPaymentsTweak() != null && keystore.getSilentPaymentScanAddress() != null && signingWallet.getPolicyType() == PolicyType.SINGLE_SP) {
-                            ECKey spendPubKey = keystore.getSilentPaymentScanAddress().getSpendKey();
-                            KeyDerivation spendKeyDerivation = new KeyDerivation(keystore.getKeyDerivation().getMasterFingerprint(), KeyDerivation.writePath(KeyDerivation.getBip352SpendDerivation(keystore.getKeyDerivation().getDerivation())));
-                            psbtInput.getSilentPaymentsSpendDerivations().put(spendPubKey, spendKeyDerivation);
+                        if(silentPaymentsTweak != null && keystore.getSilentPaymentScanAddress() != null && signingWallet.getPolicyType() == PolicyType.SINGLE_SP) {
+                            psbtInput.setSilentPaymentsTweak(silentPaymentsTweak);
+                            putSilentPaymentsSpendDerivation(keystore, psbtInput.getSilentPaymentsSpendDerivations());
                         } else {
                             ScriptType scriptType = walletNode.getWallet().getScriptType();
                             ECKey pubKey = keystore.getPubKey(walletNode);
@@ -773,8 +777,8 @@ public class PSBT {
             }
         }
 
-        Set<HashIndex> outpoints = inputPublicKeys.keySet().stream()
-                .map(input -> new HashIndex(input.getOutpoint().getHash(), input.getOutpoint().getIndex()))
+        Set<HashIndex> outpoints = getPsbtInputs().stream()
+                .map(psbtInput -> new HashIndex(psbtInput.getPrevTxid(), psbtInput.getPrevIndex()))
                 .collect(Collectors.toCollection(LinkedHashSet::new));
         ECKey summedPublicKey = SilentPaymentUtils.getSummedPublicKey(inputPublicKeys.values());
         if(summedPublicKey == null) {
@@ -1048,6 +1052,43 @@ public class PSBT {
                     otherInput.verifySigHash();
                 } catch(PSBTSignatureException e) {
                     throw new PSBTSignatureException("Combined PSBT would change sighash: " + e.getMessage());
+                }
+            }
+        }
+    }
+
+    /**
+     * Verifies that copying the finalized fields of the given PSBT into this one is safe, by checking that the signatures they contain verify against
+     * the transaction this PSBT represents, using the signing scripts and keys it already provides.
+     *
+     * @param finalizedPsbt the finalized PSBT providing the fields to be copied
+     * @throws PSBTSignatureException if the finalized fields cannot be safely copied
+     */
+    public void verifyFinalizedSignatures(PSBT finalizedPsbt) throws PSBTSignatureException {
+        if(!matches(finalizedPsbt)) {
+            throw new PSBTSignatureException("Provided PSBT does not represent a matching transaction");
+        }
+
+        PSBT verificationCopy = this.copy();
+        for(int i = 0; i < verificationCopy.getPsbtInputs().size(); i++) {
+            PSBTInput verificationInput = verificationCopy.getPsbtInputs().get(i);
+            PSBTInput finalizedInput = finalizedPsbt.getPsbtInputs().get(i);
+            //The non final fields are retained here, so the finalized signatures are verified against the signing scripts and keys already provided
+            verificationInput.setFinalScriptSig(finalizedInput.getFinalScriptSig());
+            verificationInput.setFinalScriptWitness(finalizedInput.getFinalScriptWitness());
+            verifyFinalizedSigHashes(verificationInput, verificationInput.verifyFinalizedSignatures());
+        }
+    }
+
+    private void verifyFinalizedSigHashes(PSBTInput verificationInput, Collection<TransactionSignature> signatures) throws PSBTSignatureException {
+        for(TransactionSignature signature : signatures) {
+            //Finalizing clears PSBT_IN_SIGHASH_TYPE, so the type a finalized signature commits to can only be read from the signature itself
+            SigHash sigHash = signature.getSigHash();
+            if(sigHashSeverity(sigHash) > sigHashSeverity(verificationInput.getSigHash())) {
+                try {
+                    verificationInput.verifySigHash(sigHash);
+                } catch(PSBTSignatureException e) {
+                    throw new PSBTSignatureException("Finalized PSBT would change sighash: " + e.getMessage());
                 }
             }
         }
