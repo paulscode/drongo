@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.*;
 public class CoinbaseTxoFilterTest {
     private static final int START = 973440;
     private static final int RELEASE = 979920;
+    private static final int LONG = RELEASE - START;
     private static final int ORDINARY = Transaction.COINBASE_MATURITY_THRESHOLD;
 
     @AfterEach
@@ -79,22 +80,30 @@ public class CoinbaseTxoFilterTest {
         assertTrue(eligible(ordinaryTransaction(), START + 1, START + 1));
     }
 
-    /** Below the window, the hundred block rule, unchanged to the block. */
+    /**
+     * A coin mined before the deployment is held too. The hundred block rule would have released it long
+     * ago, but relay will not carry the spend, so offering it would only produce a send that fails.
+     */
     @Test
-    public void belowTheWindowTheHundredBlockRuleIsUnchanged() {
+    public void coinsMinedBeforeTheDeploymentAreAlsoHeld() {
         Network.set(Network.MAINNET);
         int height = START - 5000;
-        assertFalse(eligible(coinbaseTransaction(), height, height + ORDINARY - 2));
-        assertTrue(eligible(coinbaseTransaction(), height, height + ORDINARY - 1));
+        assertFalse(eligible(coinbaseTransaction(), height, height + ORDINARY));
+        assertFalse(eligible(coinbaseTransaction(), height, height + LONG - 2));
+        assertTrue(eligible(coinbaseTransaction(), height, height + LONG - 1));
     }
 
-    /** Inside the window, nothing is spendable until the release height, however deep it is buried. */
+    /** Each coin waits the long depth from its own block, rather than to a shared unlock height. */
     @Test
-    public void insideTheWindowNothingIsSpendableUntilRelease() {
+    public void eachCoinWaitsTheLongDepthFromItsOwnBlock() {
         Network.set(Network.MAINNET);
         assertFalse(eligible(coinbaseTransaction(), START, START + ORDINARY));
         assertFalse(eligible(coinbaseTransaction(), START, RELEASE - 2));
         assertTrue(eligible(coinbaseTransaction(), START, RELEASE - 1));
+
+        //One block later mined is one block later spendable, which a cliff would get wrong
+        assertFalse(eligible(coinbaseTransaction(), START + 1, RELEASE - 1));
+        assertTrue(eligible(coinbaseTransaction(), START + 1, RELEASE));
     }
 
     /**
