@@ -120,15 +120,43 @@ public class CoinbaseTxoFilterTest {
     }
 
     /**
-     * An unknown tip leaves the coin eligible, which is the behaviour this filter has always had. Recorded
-     * rather than endorsed: every guard here sits inside the condition, so anything it cannot answer falls
-     * through to spendable. It is safe today only because a wallet cannot hold a transaction it failed to
-     * fetch, ElectrumServer throwing rather than admitting one.
+     * A known coinbase whose maturity cannot be evaluated is refused. This is the fail-open the filter used
+     * to have: every guard sat inside the condition, so an unknown tip fell through to spendable. The blast
+     * radius of refusing is coinbases only, and the alternative is offering a coin the network will not
+     * accept a spend of.
      */
     @Test
-    public void anUnknownTipFallsThroughToEligible() {
+    public void aKnownCoinbaseWithNoTipIsNotEligible() {
         Network.set(Network.MAINNET);
-        assertTrue(eligible(coinbaseTransaction(), START, null));
+        assertFalse(eligible(coinbaseTransaction(), START, null));
+    }
+
+    /**
+     * An ordinary coin with no tip is still eligible. The tightening above must not reach beyond coinbases,
+     * or a wallet goes unspendable whenever the tip is briefly unknown.
+     */
+    @Test
+    public void anOrdinaryCoinWithNoTipIsStillEligible() {
+        Network.set(Network.MAINNET);
+        assertTrue(eligible(ordinaryTransaction(), START, null));
+    }
+
+    /**
+     * A txo whose transaction the wallet does not hold stays eligible, because we cannot tell whether it is
+     * a coinbase and failing closed would make an ordinary wallet unspendable over one missing transaction.
+     * Recorded rather than endorsed: it is safe only because ElectrumServer throws rather than admitting a
+     * txo it could not fetch the transaction for.
+     */
+    @Test
+    public void aTxoWithNoTransactionFallsThroughToEligible() {
+        Network.set(Network.MAINNET);
+        Wallet wallet = new Wallet();
+        wallet.setPolicyType(PolicyType.SINGLE_HD);
+        wallet.setScriptType(ScriptType.P2WPKH);
+        wallet.setStoredBlockHeight(START);
+        //Nothing added to the wallet's transactions, so the lookup misses
+        Transaction transaction = coinbaseTransaction();
+        assertTrue(new CoinbaseTxoFilter(wallet).isEligible(txo(transaction, START)));
     }
 
     /** A network with no deployment keeps the hundred block rule and is not frozen to mainnet's heights. */
