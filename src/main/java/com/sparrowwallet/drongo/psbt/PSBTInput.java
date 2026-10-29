@@ -38,6 +38,7 @@ public class PSBTInput {
     public static final byte PSBT_IN_REQUIRED_TIME_LOCKTIME = 0x11;
     public static final byte PSBT_IN_REQUIRED_HEIGHT_LOCKTIME = 0x12;
     public static final byte PSBT_IN_TAP_KEY_SIG = 0x13;
+    public static final byte PSBT_IN_TAP_SCRIPT_SIG = 0x14;
     public static final byte PSBT_IN_TAP_BIP32_DERIVATION = 0x16;
     public static final byte PSBT_IN_TAP_INTERNAL_KEY = 0x17;
     public static final byte PSBT_IN_SP_ECDH_SHARE = 0x1d;
@@ -62,6 +63,15 @@ public class PSBTInput {
     private byte[] hash160Preimage;
     private byte[] hash256Preimage;
     private final Map<String, String> proprietary = new LinkedHashMap<>();
+
+    /**
+     * Taproot script path signatures, keyed by the x only public key and leaf hash they were made for, as hex.
+     *
+     * Not verified here, since PSBT_IN_TAP_LEAF_SCRIPT is not parsed. Kept so that a PSBT is read faithfully: dropped at
+     * parse, an input carrying only these looked unsigned, and a combine lost them on the way back out. Held as hex like
+     * the proprietary entries, so a combiner hands back exactly what it was given. After Shrike's 065a256.
+     */
+    private final Map<String, String> tapScriptSignatures = new LinkedHashMap<>();
     private TransactionSignature tapKeyPathSignature;
     private Map<ECKey, Map<KeyDerivation, List<Sha256Hash>>> tapDerivedPublicKeys = new LinkedHashMap<>();
     private ECKey tapInternalKey;
@@ -362,6 +372,16 @@ public class PSBTInput {
                     this.proprietary.put(Utils.bytesToHex(entry.getKeyData()), Utils.bytesToHex(entry.getData()));
                     log.debug("Found proprietary input " + Utils.bytesToHex(entry.getKeyData()) + ": " + Utils.bytesToHex(entry.getData()));
                     break;
+                case PSBT_IN_TAP_SCRIPT_SIG:
+                    if(entry.getKeyData() == null || entry.getKeyData().length != 64) {
+                        throw new PSBTParseException("PSBT key type must be one byte plus x only pub key plus leaf hash");
+                    }
+                    if(entry.getData() == null || (entry.getData().length != 64 && entry.getData().length != 65)) {
+                        throw new PSBTParseException("PSBT taproot script path signature must be 64 or 65 bytes");
+                    }
+                    this.tapScriptSignatures.put(Utils.bytesToHex(entry.getKeyData()), Utils.bytesToHex(entry.getData()));
+                    log.debug("Found input taproot script path signature " + Utils.bytesToHex(entry.getData()));
+                    break;
                 case PSBT_IN_TAP_KEY_SIG:
                     entry.checkOneByteKey();
                     this.tapKeyPathSignature = TransactionSignature.decodeFromBitcoin(SCHNORR, entry.getData(), true);
@@ -549,6 +569,10 @@ public class PSBTInput {
             entries.add(populateEntry(PSBT_IN_TAP_KEY_SIG, null, tapKeyPathSignature.encodeToBitcoin()));
         }
 
+        for(Map.Entry<String, String> entry : tapScriptSignatures.entrySet()) {
+            entries.add(populateEntry(PSBT_IN_TAP_SCRIPT_SIG, Utils.hexToBytes(entry.getKey()), Utils.hexToBytes(entry.getValue())));
+        }
+
         for(Map.Entry<ECKey, Map<KeyDerivation, List<Sha256Hash>>> entry : tapDerivedPublicKeys.entrySet()) {
             if(!entry.getValue().isEmpty()) {
                 entries.add(populateEntry(PSBT_IN_TAP_BIP32_DERIVATION, entry.getKey().getPubKeyXCoord(), serializeTaprootKeyDerivation(Collections.emptyList(), entry.getValue().keySet().iterator().next())));
@@ -672,6 +696,7 @@ public class PSBTInput {
         }
 
         proprietary.putAll(psbtInput.proprietary);
+        tapScriptSignatures.putAll(psbtInput.tapScriptSignatures);
 
         if(psbtInput.tapKeyPathSignature != null) {
             tapKeyPathSignature = psbtInput.tapKeyPathSignature;
@@ -776,6 +801,10 @@ public class PSBTInput {
 
     public Map<String, String> getProprietary() {
         return proprietary;
+    }
+
+    public Map<String, String> getTapScriptSignatures() {
+        return Collections.unmodifiableMap(tapScriptSignatures);
     }
 
     public TransactionSignature getTapKeyPathSignature() {
@@ -1083,14 +1112,14 @@ public class PSBTInput {
                 if(isTaproot() && tapKeyPathSignature != null) {
                     requireRequestedType(localSigHash, tapKeyPathSignature.sighashFlags);
                     ECKey outputKey = P2TR.getPublicKeyFromScript(getUtxo().getScript());
-                    if(!outputKey.verify(hashForSignatureType(signingScript, tapKeyPathSignature, localSigHash), tapKeyPathSignature)) {
+                    if(!verifies(outputKey, hashForSignatureType(signingScript, tapKeyPathSignature, localSigHash), tapKeyPathSignature)) {
                         throw new PSBTSignatureException("Tweaked internal key does not verify against provided taproot keypath signature");
                     }
                 } else {
                     for(ECKey sigPublicKey : getPartialSignatures().keySet()) {
                         TransactionSignature signature = getPartialSignature(sigPublicKey);
                         requireRequestedType(localSigHash, signature.sighashFlags);
-                        if(!sigPublicKey.verify(hashForSignatureType(signingScript, signature, localSigHash), signature)) {
+                        if(!verifies(sigPublicKey, hashForSignatureType(signingScript, signature, localSigHash), signature)) {
                             throw new PSBTSignatureException("Partial signature does not verify against provided public key");
                         }
                     }
@@ -1411,6 +1440,7 @@ public class PSBTInput {
         proprietary.clear();
         tapDerivedPublicKeys.clear();
         tapKeyPathSignature = null;
+        tapScriptSignatures.clear();
         silentPaymentsEcdhShares.clear();
         silentPaymentsDLEQProofs.clear();
         silentPaymentsSpendDerivations.clear();
@@ -1508,6 +1538,19 @@ public class PSBTInput {
     private byte baseOf(byte sigHashType) {
         byte base = (byte)(sigHashType & ~SigHash.UNIFIED_FLAG);
         return isTaproot() && base == SigHash.DEFAULT.value ? SigHash.ALL.value : base;
+    }
+
+    /**
+     * A key in a PSBT is not validated at parse, so one that is not a point on the curve is only found out when it is
+     * used, by an unchecked exception. That is a signature that does not verify, and is reported as one rather than
+     * thrown past a caller that only expects a signature error.
+     */
+    private static boolean verifies(ECKey key, Sha256Hash hash, TransactionSignature signature) {
+        try {
+            return hash != null && key.verify(hash, signature);
+        } catch(RuntimeException e) {
+            return false;
+        }
     }
 
     private void requireRequestedType(SigHash declared, byte sigHashType) throws PSBTSignatureException {
