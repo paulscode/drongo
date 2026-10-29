@@ -19,7 +19,9 @@ public class Block extends Message {
         blockHeader = new BlockHeader(payload, cursor);
         cursor += blockHeader.getMessageSize();
 
-        hash = Sha256Hash.wrapReversed(Sha256Hash.hashTwice(payload, offset, cursor - offset));
+        //The header's own hash, which is BLAKE2b above the fork: hashing the serialized bytes twice with SHA256 names no
+        //block on this chain for a v2 header
+        hash = blockHeader.getHash();
         if(cursor != payload.length) {
             long numTransactions = readVarInt();
             if(numTransactions < 0) {

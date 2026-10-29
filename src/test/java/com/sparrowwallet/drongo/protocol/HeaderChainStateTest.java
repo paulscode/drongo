@@ -176,7 +176,9 @@ public class HeaderChainStateTest {
 
     @Test
     public void testMinimumDifficultyRunRejectedUnderFullRules() throws IOException {
-        Network.set(Network.MAINNET);
+        //Signet rather than mainnet: both apply the full difficulty rule, but these v1 headers sit at a height where mainnet
+        //now requires BLAKE2b headers, which would refuse them for their format before their target is read
+        Network.set(Network.SIGNET);
 
         //The attack per-header proof of work cannot stop: a linked run of real, well-formed headers that simply claim an easier target than the chain requires
         List<BlockHeader> headers = readHeaders("/headers/testnet-window.txt");
@@ -302,6 +304,89 @@ public class HeaderChainStateTest {
 
             return headers;
         }
+    }
+
+    /**
+     * The real chain across the fork: heights 961632 to 961641, eight SHA256d headers then two BLAKE2b ones, anchored at
+     * the last pinned checkpoint. Taken from Shrike's drongo (d01e0c3), which read them from the chain.
+     */
+    private List<BlockHeader> activationHeaders() throws IOException {
+        List<BlockHeader> headers = readHeaders("/headers/mainnet-activation.txt");
+        Assertions.assertEquals(10, headers.size());
+        return headers;
+    }
+
+    private HeaderChainState activationAnchor(List<BlockHeader> headers) {
+        return new HeaderChainState(961631, headers.getFirst().getPrevBlockHash(), headers.getFirst().getDifficultyTarget());
+    }
+
+    @Test
+    public void testTheRealChainAcrossTheForkIsAccepted() throws IOException {
+        Network.set(Network.MAINNET);
+        List<BlockHeader> headers = activationHeaders();
+        HeaderChainState chainState = activationAnchor(headers);
+        for(BlockHeader header : headers) {
+            chainState.add(header);
+        }
+
+        Assertions.assertEquals(961641, chainState.getHeight());
+        Assertions.assertFalse(headers.get(7).isV2(), "961639 is the last SHA256d block");
+        Assertions.assertTrue(headers.get(8).isV2(), "961640 is the first BLAKE2b block");
+        Assertions.assertEquals(Blake2bDeployment.activationBlockHash(Network.MAINNET), headers.get(8).getHash());
+    }
+
+    /**
+     * The attack this rule exists for: an SHA256d header at the fork height, linked and claiming the eased target the shift
+     * calls for. Its proof of work is never what stops it, since that is cheap to meet at that target; its format is.
+     */
+    @Test
+    public void testAnSha256dHeaderAtTheForkIsRefused() throws IOException {
+        Network.set(Network.MAINNET);
+        List<BlockHeader> headers = activationHeaders();
+        HeaderChainState chainState = activationAnchor(headers);
+        for(int i = 0; i < 8; i++) {
+            chainState.add(headers.get(i));
+        }
+
+        BlockHeader real = headers.get(8);
+        BlockHeader forged = new BlockHeader(0x20000000L, real.getPrevBlockHash(), real.getMerkleRoot(), null, real.getTime(), real.getDifficultyTarget(), 0);
+        Assertions.assertFalse(forged.isV2());
+        VerificationException e = Assertions.assertThrows(VerificationException.class, () -> chainState.add(forged));
+        Assertions.assertTrue(e.getMessage().contains("is an SHA256d header"), e.getMessage());
+    }
+
+    @Test
+    public void testABlake2bHeaderBelowTheForkIsRefused() throws IOException {
+        Network.set(Network.MAINNET);
+        BlockHeader v2 = activationHeaders().get(8);
+        VerificationException e = Assertions.assertThrows(VerificationException.class, () -> HeaderChainState.requireExpectedVersion(v2, 961639));
+        Assertions.assertTrue(e.getMessage().contains("is a BLAKE2b header"), e.getMessage());
+    }
+
+    /**
+     * A BLAKE2b header at the fork height that is not the block this chain mined there. The format is right, so only the pin
+     * tells them apart.
+     */
+    @Test
+    public void testTheWrongBlake2bBlockAtTheForkIsRefused() throws IOException {
+        Network.set(Network.MAINNET);
+        List<BlockHeader> headers = activationHeaders();
+        HeaderChainState.requireExpectedVersion(headers.get(8), 961640);
+        HeaderChainState.requireExpectedVersion(headers.get(9), 961641);
+
+        VerificationException e = Assertions.assertThrows(VerificationException.class, () -> HeaderChainState.requireExpectedVersion(headers.get(9), 961640));
+        Assertions.assertTrue(e.getMessage().contains("is not the block this chain mined there"), e.getMessage());
+    }
+
+    /**
+     * Regtest activates wherever its node says, so it keeps no format rule.
+     */
+    @Test
+    public void testANetworkWithoutAForkHeightKeepsNoFormatRule() throws IOException {
+        Network.set(Network.REGTEST);
+        List<BlockHeader> headers = activationHeaders();
+        HeaderChainState.requireExpectedVersion(headers.get(0), 5_000_000);
+        HeaderChainState.requireExpectedVersion(headers.get(8), 1);
     }
 
     private static List<BlockHeader> readHeaders(String resource) throws IOException {

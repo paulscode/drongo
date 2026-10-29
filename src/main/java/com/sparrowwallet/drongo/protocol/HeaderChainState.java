@@ -61,6 +61,7 @@ public class HeaderChainState {
             throw new VerificationException("Header at height " + (height + 1) + " has difficulty target " + Long.toHexString(header.getDifficultyTarget())
                     + " but the chain requires " + Long.toHexString(requiredBits));
         }
+        requireExpectedVersion(header, height + 1);
         if(!header.verifyProofOfWork()) {
             throw new VerificationException("Header at height " + (height + 1) + " does not meet its required proof of work target");
         }
@@ -143,6 +144,36 @@ public class HeaderChainState {
 
     public synchronized int getHeight() {
         return height;
+    }
+
+    /**
+     * The header's format has to be the one its height calls for, and at the activation height it has to be the block this
+     * chain mined there.
+     *
+     * <p>Without the first, a v1 header above the fork is checked against SHA256d work at the eased target, which the shift
+     * at the activation height leaves about four million times easier than the SHA256d chain's: a chain of them is cheap to
+     * mine with ordinary hardware, and would be accepted. Without the second, a server that passed the connect check by
+     * serving the right header at that height could still sync a different chain past it, since nothing tied the stored
+     * header there to the pin. Networks this build has no fork height for keep no format rule, as regtest activates
+     * wherever its node says.
+     */
+    static void requireExpectedVersion(BlockHeader header, int height) throws VerificationException {
+        Network network = Network.get();
+        int activation = Blake2bDeployment.activationHeight(network);
+        if(activation == Integer.MAX_VALUE) {
+            return;
+        }
+
+        boolean expectV2 = height >= activation;
+        if(header.isV2() != expectV2) {
+            throw new VerificationException("Header at height " + height + " is " + (header.isV2() ? "a BLAKE2b" : "an SHA256d")
+                    + " header, but the chain requires " + (expectV2 ? "BLAKE2b" : "SHA256d") + " headers from height " + activation);
+        }
+
+        Sha256Hash pinned = Blake2bDeployment.activationBlockHash(network);
+        if(height == activation && pinned != null && !pinned.equals(header.getHash())) {
+            throw new VerificationException("Header at height " + height + " is not the block this chain mined there: expected " + pinned + ", got " + header.getHash());
+        }
     }
 
     public synchronized Sha256Hash getHash() {
