@@ -203,4 +203,32 @@ public class VerifiedSignatureOptInTest {
         PSBTInput psbtInput = new PSBT(transaction).getPsbtInputs().getFirst();
         Assertions.assertTrue(psbtInput.getVerifiedSignatures(Set.of(outputKey(KEY))).isEmpty());
     }
+
+    /**
+     * A script this cannot read leaves an answer, not an exception. A P2SH input with no redeem script and a final
+     * scriptSig holding nothing script shaped has no script to unwrap. The caller is drawing a label, and an exception
+     * there abandons the label and leaves what it said before standing. After Shrike's dc23de1.
+     */
+    @Test
+    public void aScriptThatCannotBeReadAnswersNothing() {
+        Script p2sh = ScriptType.P2SH.getOutputScript(ScriptType.P2WPKH.getOutputScript(PolicyType.SINGLE_HD, KEY));
+
+        Transaction transaction = new Transaction();
+        transaction.setVersion(2);
+        transaction.addInput(Sha256Hash.ZERO_HASH, 0, new Script(new byte[0]));
+        transaction.addOutput(90000L, p2sh);
+
+        PSBT psbt = new PSBT(transaction);
+        PSBTInput psbtInput = psbt.getPsbtInputs().getFirst();
+        psbtInput.setWitnessUtxo(new TransactionOutput(null, 100000L, p2sh.getProgram()));
+
+        byte[] push = new byte[65];
+        push[64] = SigHash.UNIFIED_ALL.value;
+        List<ScriptChunk> chunks = new ArrayList<>();
+        chunks.add(new ScriptChunk(65, push));
+        psbtInput.setFinalScriptSig(new Script(chunks));
+
+        Map<ECKey, TransactionSignature> verified = Assertions.assertDoesNotThrow(() -> psbtInput.getVerifiedSignatures(Set.of(outputKey(KEY))));
+        Assertions.assertTrue(verified.isEmpty(), "a script that cannot be read answers with nothing rather than throwing");
+    }
 }

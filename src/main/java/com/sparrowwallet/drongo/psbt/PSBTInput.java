@@ -1146,14 +1146,23 @@ public class PSBTInput {
             return verified;
         }
 
-        Script signingScript = getSigningScript();
-        if(signingScript == null) {
+        //Both read what the input carries, and a hostile one can make either throw: a P2SH input with no redeem script
+        //and a final scriptSig holding no script leaves nothing to unwrap. This answers a screen drawing a label, so it
+        //answers nothing rather than throwing, which is what the rest of it promises for anything it cannot check.
+        Script signingScript;
+        List<TransactionSignature> signatures;
+        try {
+            signingScript = getSigningScript();
+            if(signingScript == null) {
+                return verified;
+            }
+
+            //Read once. getSignatures parses the witness, and a caller with several keys would otherwise
+            //re-parse it for each of them.
+            signatures = new ArrayList<>(getSignatures());
+        } catch(RuntimeException e) {
             return verified;
         }
-
-        //Read once. getSignatures parses the witness, and a caller with several keys would otherwise
-        //re-parse it for each of them.
-        List<TransactionSignature> signatures = new ArrayList<>(getSignatures());
         if(signatures.size() > MAX_SIGNATURES_CHECKED) {
             //A witness is a list of pushes, and any 64 or 65 byte push reads as a signature, so the number
             //of them is the file's to choose. Past this there is nothing left to learn: a real input does
