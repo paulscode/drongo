@@ -1560,8 +1560,11 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
                                                                                          Map<TransactionInput, WalletNode> signingNodes) {
         Map<TransactionInput, Map<TransactionSignature, Keystore>> signedKeystores = new LinkedHashMap<>();
 
+        //A taproot signature, and an opted-in signature of any script type, commits to every output the transaction
+        //spends, so either needs them all. Without them the input cannot be checked, and is left out.
         boolean anyTaproot = signingNodes.values().stream().anyMatch(node -> node.getWallet().getScriptType() == P2TR);
-        List<TransactionOutput> spentOutputs = anyTaproot ? getSpentOutputs(transaction, inputTransactions) : null;
+        boolean anyUnified = signingNodes.keySet().stream().anyMatch(Wallet::carriesUnifiedSignature);
+        List<TransactionOutput> spentOutputs = anyTaproot || anyUnified ? getSpentOutputs(transaction, inputTransactions) : null;
 
         for(TransactionInput txInput : signingNodes.keySet()) {
             WalletNode walletNode = signingNodes.get(txInput);
@@ -1577,7 +1580,8 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
 
             Transaction inputTransaction = inputTransactions.apply(txInput.getOutpoint().getHash());
             boolean taproot = signingWallet.getScriptType() == P2TR;
-            if(inputTransaction != null && inputTransaction.getOutputs().size() > txInput.getOutpoint().getIndex() && (!taproot || spentOutputs != null)) {
+            boolean unified = carriesUnifiedSignature(txInput);
+            if(inputTransaction != null && inputTransaction.getOutputs().size() > txInput.getOutpoint().getIndex() && (!(taproot || unified) || spentOutputs != null)) {
                 TransactionOutput spentTxo = inputTransaction.getOutputs().get((int)txInput.getOutpoint().getIndex());
 
                 Script signingScript = getSigningScript(txInput, spentTxo);
@@ -1587,7 +1591,12 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
                 for(ECKey sigPublicKey : keystoreKeysForNode.keySet()) {
                     for(TransactionSignature signature : signatures) {
                         Sha256Hash hash = sigHashes.computeIfAbsent(signature.sighashFlags, sigHashType -> {
-                            if(signingWallet.getScriptType() == P2TR) {
+                            //Selected by the opt-in bit, not by the input's kind, as PSBTInput does: an opted-in signature
+                            //is made over the unified message whatever the script type, and checking it against the legacy
+                            //one fails every time. That reads the wallet's own opted-in spends as unsigned.
+                            if((sigHashType & SigHash.UNIFIED_FLAG) != 0) {
+                                return hashForUnifiedSignature(transaction, spentOutputs, txInput, signingWallet.getScriptType(), signingScript, sigHashType);
+                            } else if(signingWallet.getScriptType() == P2TR) {
                                 return transaction.hashForTaprootSignature(spentOutputs, txInput.getIndex(), !P2TR.isScriptType(signingScript), signingScript, sigHashType, null);
                             } else if(txInput.hasWitness()) {
                                 return transaction.hashForWitnessSignature(txInput.getIndex(), signingScript.getProgram(), spentTxo.getValue(), sigHashType);
@@ -1596,7 +1605,7 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
                             }
                         });
 
-                        if(sigPublicKey.verify(hash, signature)) {
+                        if(hash != null && sigPublicKey.verify(hash, signature)) {
                             keySignatureMap.put(sigPublicKey, signature);
                         }
                     }
@@ -1614,6 +1623,43 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
         }
 
         return signedKeystores;
+    }
+
+    /**
+     * Whether any signature on this input carries the opt-in bit. Read off the pushes without verifying them, which is
+     * only used to decide what to fetch: a push that merely looks like one costs a lookup, never a verdict.
+     */
+    private static boolean carriesUnifiedSignature(TransactionInput txInput) {
+        List<TransactionSignature> signatures = txInput.hasWitness() ? txInput.getWitness().getSignatures() : txInput.getScriptSig().getSignatures();
+        return signatures.stream().anyMatch(signature -> (signature.sighashFlags & SigHash.UNIFIED_FLAG) != 0);
+    }
+
+    /**
+     * The unified message an opted-in signature on this input commits to, mapped from the wallet's script type the way
+     * PSBTInput maps it from the input's. Null where it cannot be computed, which the caller reads as not verified:
+     * without every spent output, for a taproot script path, which this wallet does not spend by, or for a hash type
+     * the unified rules do not define.
+     */
+    private static Sha256Hash hashForUnifiedSignature(Transaction transaction, List<TransactionOutput> spentOutputs, TransactionInput txInput,
+                                                      ScriptType scriptType, Script signingScript, byte sigHashType) {
+        if(spentOutputs == null) {
+            return null;
+        }
+
+        try {
+            if(scriptType == P2TR) {
+                if(!P2TR.isScriptType(signingScript)) {
+                    return null;
+                }
+                return transaction.hashForUnifiedSignature(spentOutputs, txInput.getIndex(), UnifiedScriptType.TAPROOT, null, sigHashType, null, null, null);
+            } else if(txInput.hasWitness()) {
+                return transaction.hashForUnifiedSignature(spentOutputs, txInput.getIndex(), UnifiedScriptType.WITNESS_V0, signingScript.getProgram(), sigHashType, null, null, null);
+            } else {
+                return transaction.hashForUnifiedSignature(spentOutputs, txInput.getIndex(), UnifiedScriptType.BARE, signingScript.getProgram(), sigHashType, null, null, null);
+            }
+        } catch(IllegalArgumentException e) {
+            return null;
+        }
     }
 
     /**
