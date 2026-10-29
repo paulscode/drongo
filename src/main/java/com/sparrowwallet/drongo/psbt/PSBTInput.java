@@ -807,6 +807,23 @@ public class PSBTInput {
         return Collections.unmodifiableMap(tapScriptSignatures);
     }
 
+    /**
+     * The taproot script path signatures decoded, for reading their hash types. Not verified, as the leaf script that
+     * would check them is not parsed, so only callers that withhold a claim on what they read should use these. One
+     * that does not decode is left out.
+     */
+    public List<TransactionSignature> getDecodedTapScriptSignatures() {
+        List<TransactionSignature> signatures = new ArrayList<>();
+        for(String hex : tapScriptSignatures.values()) {
+            try {
+                signatures.add(TransactionSignature.decodeFromBitcoin(SCHNORR, Utils.hexToBytes(hex), false));
+            } catch(Exception e) {
+                //Shaped wrong, so it says nothing
+            }
+        }
+        return signatures;
+    }
+
     public TransactionSignature getTapKeyPathSignature() {
         return tapKeyPathSignature;
     }
@@ -1112,14 +1129,14 @@ public class PSBTInput {
                 if(isTaproot() && tapKeyPathSignature != null) {
                     requireRequestedType(localSigHash, tapKeyPathSignature.sighashFlags);
                     ECKey outputKey = P2TR.getPublicKeyFromScript(getUtxo().getScript());
-                    if(!verifies(outputKey, hashForSignatureType(signingScript, tapKeyPathSignature, localSigHash), tapKeyPathSignature)) {
+                    if(!verifies(outputKey, requireHash(signingScript, tapKeyPathSignature, localSigHash), tapKeyPathSignature)) {
                         throw new PSBTSignatureException("Tweaked internal key does not verify against provided taproot keypath signature");
                     }
                 } else {
                     for(ECKey sigPublicKey : getPartialSignatures().keySet()) {
                         TransactionSignature signature = getPartialSignature(sigPublicKey);
                         requireRequestedType(localSigHash, signature.sighashFlags);
-                        if(!verifies(sigPublicKey, hashForSignatureType(signingScript, signature, localSigHash), signature)) {
+                        if(!verifies(sigPublicKey, requireHash(signingScript, signature, localSigHash), signature)) {
                             throw new PSBTSignatureException("Partial signature does not verify against provided public key");
                         }
                     }
@@ -1334,7 +1351,8 @@ public class PSBTInput {
                 for(TransactionSignature signature : signatures) {
                     Sha256Hash hash = sigHashes.computeIfAbsent(signature.sighashFlags, sigHashType -> getHashForSignature(signingScript, sigHashType));
 
-                    if(sigPublicKey.verify(hash, signature)) {
+                    //The candidate keys include the PSBT's own derivations, so one may not be a point on the curve
+                    if(verifies(sigPublicKey, hash, signature)) {
                         signingKeys.put(sigPublicKey, signature);
                     }
                 }
@@ -1515,15 +1533,6 @@ public class PSBTInput {
 
 
     /**
-     * The message a given signature commits to, read from the signature's own hash type byte.
-     *
-     * Falls back to the type the input declares when that byte is one this enum does not model. Consensus
-     * accepts any byte for bare, P2SH and segwit v0, so such a signature is not necessarily malformed, and
-     * guessing a type for it here would check it against a message nobody signed. Declining to check is not
-     * an option either: this returns a hash, and throwing out of a verification would refuse the whole PSBT
-     * over one signature. Falling back leaves that case exactly as it behaved before the opt-in existed.
-     */
-    /**
      * Whether a signature on this input carries a hash type it was asked for.
      *
      * The opt-in bit is the one thing a signer may differ on, because it is the one thing this wallet varies per signer:
@@ -1536,8 +1545,12 @@ public class PSBTInput {
     }
 
     private byte baseOf(byte sigHashType) {
-        byte base = (byte)(sigHashType & ~SigHash.UNIFIED_FLAG);
-        return isTaproot() && base == SigHash.DEFAULT.value ? SigHash.ALL.value : base;
+        //Only a true DEFAULT reads as ALL. 0x20, DEFAULT with the opt-in bit, is a type the unified rules reserve, and
+        //read as ALL here it would pass the bound and fail at broadcast
+        if(isTaproot() && sigHashType == SigHash.DEFAULT.value) {
+            return SigHash.ALL.value;
+        }
+        return (byte)(sigHashType & ~SigHash.UNIFIED_FLAG);
     }
 
     /**
@@ -1553,6 +1566,19 @@ public class PSBTInput {
         }
     }
 
+    /**
+     * The message a signature on this input commits to, or a signature error saying why it cannot be built. A taproot or
+     * opted-in message commits to every spent output, so another input missing its UTXO leaves this one uncheckable,
+     * which escaped as an IllegalArgumentException past callers that only expect a signature error.
+     */
+    private Sha256Hash requireHash(Script signingScript, TransactionSignature signature, SigHash declared) throws PSBTSignatureException {
+        try {
+            return hashForSignatureType(signingScript, signature, declared);
+        } catch(IllegalArgumentException e) {
+            throw new PSBTSignatureException("Input " + index + " cannot be verified: " + e.getMessage());
+        }
+    }
+
     private void requireRequestedType(SigHash declared, byte sigHashType) throws PSBTSignatureException {
         if(!isRequestedType(declared, sigHashType)) {
             throw new PSBTSignatureException("Input " + index + " carries a signature with hash type 0x"
@@ -1560,6 +1586,15 @@ public class PSBTInput {
         }
     }
 
+    /**
+     * The message a given signature commits to, read from the signature's own hash type byte.
+     *
+     * Falls back to the type the input declares when that byte is one this enum does not model. Consensus
+     * accepts any byte for bare, P2SH and segwit v0, so such a signature is not necessarily malformed, and
+     * guessing a type for it here would check it against a message nobody signed. Declining to check is not
+     * an option either: this returns a hash, and throwing out of a verification would refuse the whole PSBT
+     * over one signature. Falling back leaves that case exactly as it behaved before the opt-in existed.
+     */
     private Sha256Hash hashForSignatureType(Script connectedScript, TransactionSignature signature, SigHash declared) {
         SigHash sigHash;
         try {

@@ -254,4 +254,54 @@ public class VerifiedSignatureOptInTest {
         anyoneCanPay.setSigHash(SigHash.UNIFIED_ALL);
         Assertions.assertThrows(PSBTSignatureException.class, anyoneCanPay::verifySignatures, "Anyone Can Pay was not asked for");
     }
+
+    /**
+     * An opted-in message commits to every spent output, so another input missing its UTXO leaves this one uncheckable.
+     * That has to be a signature error, which is what the callers handle, not an IllegalArgumentException past them.
+     */
+    @Test
+    public void aMessageThatCannotBeBuiltIsASignatureError() {
+        Script spk = ScriptType.P2WPKH.getOutputScript(PolicyType.SINGLE_HD, KEY);
+        Transaction transaction = new Transaction();
+        transaction.setVersion(2);
+        transaction.addInput(Sha256Hash.wrap(Utils.hexToBytes("aa".repeat(32))), 0, new Script(new byte[0]));
+        transaction.addInput(Sha256Hash.wrap(Utils.hexToBytes("bb".repeat(32))), 0, new Script(new byte[0]));
+        transaction.addOutput(90000L, spk);
+
+        PSBT psbt = new PSBT(transaction);
+        PSBTInput first = psbt.getPsbtInputs().get(0);
+        psbt.getPsbtInputs().get(1).setWitnessUtxo(new TransactionOutput(null, 50000L, spk.getProgram()));
+        first.setWitnessUtxo(new TransactionOutput(null, 100000L, spk.getProgram()));
+        first.setSigHash(SigHash.UNIFIED_ALL);
+        first.sign(outputKey(KEY));
+        psbt.getPsbtInputs().get(1).setWitnessUtxo(null);
+
+        Assertions.assertThrows(PSBTSignatureException.class, first::verifySignatures);
+    }
+
+    /** 0x20 is DEFAULT with the opt-in bit, a type the unified rules reserve, and must not pass as the ALL it resembles. */
+    @Test
+    public void aReservedTaprootTypeIsNotTakenForAll() throws Exception {
+        ECKey internal = ECKey.fromPrivate(Utils.hexToBytes("33".repeat(32)));
+        Script spk = ScriptType.P2TR.getOutputScript(PolicyType.SINGLE_HD, internal);
+        Transaction transaction = new Transaction();
+        transaction.setVersion(2);
+        transaction.addInput(Sha256Hash.wrap(Utils.hexToBytes("cc".repeat(32))), 0, new Script(new byte[0]));
+        transaction.addOutput(90000L, spk);
+
+        PSBT psbt = new PSBT(transaction);
+        PSBTInput psbtInput = psbt.getPsbtInputs().getFirst();
+        psbtInput.setWitnessUtxo(new TransactionOutput(null, 100000L, spk.getProgram()));
+        psbtInput.setTapInternalKey(internal);
+        psbtInput.setSigHash(SigHash.UNIFIED_ALL);
+        psbtInput.sign(ScriptType.P2TR.getOutputKey(PolicyType.SINGLE_HD, internal));
+        TransactionSignature real = psbtInput.getTapKeyPathSignature();
+        Assertions.assertNotNull(real);
+        Assertions.assertTrue(psbtInput.verifySignatures(), "the real opted-in signature passes");
+
+        byte[] encoded = real.encodeToBitcoin();
+        encoded[64] = 0x20;
+        psbtInput.setTapKeyPathSignature(TransactionSignature.decodeFromBitcoin(TransactionSignature.Type.SCHNORR, encoded, false));
+        Assertions.assertThrows(PSBTSignatureException.class, psbtInput::verifySignatures);
+    }
 }

@@ -56,12 +56,14 @@ public class HeaderChainState {
         if(!header.getPrevBlockHash().equals(hash)) {
             throw new VerificationException("Header at height " + (height + 1) + " does not link to the previous header");
         }
+        //Before the target, so a header from the chain that kept SHA256d is named for what it is rather than as a header
+        //with the wrong bits
+        requireExpectedVersion(header, height + 1);
         long requiredBits = getRequiredDifficulty(header);
         if(header.getDifficultyTarget() != requiredBits) {
             throw new VerificationException("Header at height " + (height + 1) + " has difficulty target " + Long.toHexString(header.getDifficultyTarget())
                     + " but the chain requires " + Long.toHexString(requiredBits));
         }
-        requireExpectedVersion(header, height + 1);
         if(!header.verifyProofOfWork()) {
             throw new VerificationException("Header at height " + (height + 1) + " does not meet its required proof of work target");
         }

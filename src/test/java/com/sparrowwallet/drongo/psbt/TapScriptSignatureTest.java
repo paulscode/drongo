@@ -178,4 +178,19 @@ public class TapScriptSignatureTest {
         coordinator.combine(signer);
         Assertions.assertEquals(signer.getTapScriptSignatures(), coordinator.getTapScriptSignatures());
     }
+
+    /** A PSBT carrying only these has been signed, so it must not read as editable, and its hash types can be read. */
+    @Test
+    public void they_count_as_signatures_and_decode_for_their_hash_type() throws Exception {
+        byte anyoneCanPay = SigHash.ANYONECANPAY_ALL.byteValue();
+        Transaction transaction = new Transaction();
+        transaction.setVersion(2);
+        transaction.addInput(Sha256Hash.ZERO_HASH, 0, new Script(new byte[0]));
+        PSBT psbt = new PSBT(transaction);
+        PSBTInput psbtInput = new PSBTInput(psbt, List.of(tapScriptEntry(signature(anyoneCanPay))), 0);
+        psbt.getPsbtInputs().set(0, psbtInput);
+
+        Assertions.assertTrue(psbt.hasSignatures());
+        Assertions.assertEquals(anyoneCanPay, psbtInput.getDecodedTapScriptSignatures().getFirst().sighashFlags);
+    }
 }

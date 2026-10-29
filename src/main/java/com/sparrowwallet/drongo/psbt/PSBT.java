@@ -868,7 +868,10 @@ public class PSBT {
 
     public boolean hasSignatures() {
         for(PSBTInput psbtInput : getPsbtInputs()) {
-            if(!psbtInput.getPartialSignatures().isEmpty() || psbtInput.getTapKeyPathSignature() != null || psbtInput.getFinalScriptSig() != null || psbtInput.getFinalScriptWitness() != null) {
+            //Taproot script path signatures count too: kept now rather than dropped at parse, they would otherwise leave a
+            //PSBT editable whose edits invalidate signatures it goes on carrying
+            if(!psbtInput.getPartialSignatures().isEmpty() || psbtInput.getTapKeyPathSignature() != null || !psbtInput.getTapScriptSignatures().isEmpty()
+                    || psbtInput.getFinalScriptSig() != null || psbtInput.getFinalScriptWitness() != null) {
                 return true;
             }
         }

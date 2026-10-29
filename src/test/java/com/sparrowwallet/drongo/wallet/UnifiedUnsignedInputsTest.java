@@ -132,6 +132,71 @@ public class UnifiedUnsignedInputsTest {
         }
     }
 
+    /**
+     * The quorum shapes besides P2WSH: P2SH multisig hashes the bare message over the redeem script, and P2SH-P2WSH the
+     * witness v0 one over the witness script. Each cosigner takes the opt-in in turn, all three sign, and finalising has
+     * to keep the opted-in signature and leave every input reading as signed.
+     */
+    @Test
+    public void otherQuorumShapesKeepAndCountTheOptedInSignature() throws Exception {
+        for(ScriptType scriptType : List.of(ScriptType.P2SH, ScriptType.P2SH_P2WSH)) {
+            for(int optedIn = 0; optedIn < 3; optedIn++) {
+                Wallet wallet = multisigWallet(scriptType);
+                Transaction funding = fund(wallet);
+
+                PSBT psbt = createPsbt(wallet);
+                for(Map.Entry<PSBTInput, WalletNode> entry : wallet.getSigningNodes(psbt).entrySet()) {
+                    PSBTInput psbtInput = entry.getKey();
+                    for(int i = 0; i < 3; i++) {
+                        psbtInput.setSigHash(i == optedIn ? SigHash.UNIFIED_ALL : SigHash.ALL);
+                        psbtInput.sign(wallet.getScriptType().getOutputKey(wallet.getPolicyType(), wallet.getKeystores().get(i).getKey(entry.getValue())));
+                    }
+                }
+                wallet.finalise(psbt);
+                Transaction spend = psbt.extractTransaction();
+
+                Assertions.assertTrue(carriesUnified(spend), scriptType + ", cosigner " + optedIn + ": the opted-in signature must survive finalising");
+                Assertions.assertTrue(wallet.getUnsignedInputs(spend, lookup(funding)).isEmpty(), scriptType + ", cosigner " + optedIn + ": must read as signed");
+            }
+        }
+    }
+
+    /**
+     * A transaction in the segwit format gives every input a witness, an empty one for a legacy input. Read off that empty
+     * witness, a legacy input's signatures went unfound and it read as unsigned, so a P2PKH spend sharing a transaction with
+     * a segwit input elsewhere was dropped from the history as not validly signed.
+     */
+    @Test
+    public void aLegacyInputInASegwitTransactionIsReadFromItsScriptSig() throws Exception {
+        Wallet wallet = singleSigWallet(ScriptType.P2PKH);
+        Transaction funding = fund(wallet);
+        WalletNode node = wallet.getNode(KeyPurpose.RECEIVE).getChildren().iterator().next();
+        ECKey key = wallet.getKeystores().get(0).getKey(node);
+
+        Sha256Hash foreign = Sha256Hash.wrap("22".repeat(32));
+        Script scriptCode = funding.getOutputs().getFirst().getScript();
+
+        //The legacy message replaces every scriptSig, so it can be taken from the unsigned form
+        Transaction unsigned = new Transaction();
+        unsigned.setVersion(2);
+        unsigned.addInput(funding.getTxId(), 0, new Script(new byte[0]));
+        unsigned.addInput(foreign, 0, new Script(new byte[0]));
+        unsigned.addOutput(900_000L, wallet.getAddress(node));
+        Sha256Hash hash = unsigned.hashForLegacySignature(0, scriptCode.getProgram(), SigHash.ALL.value);
+        TransactionSignature signature = key.sign(hash, SigHash.ALL, TransactionSignature.Type.ECDSA);
+
+        Transaction spend = new Transaction();
+        spend.setVersion(2);
+        spend.addInput(funding.getTxId(), 0, ScriptType.P2PKH.getScriptSig(PolicyType.SINGLE_HD, scriptCode, ECKey.fromPublicOnly(key), signature));
+        //Added with its witness, which puts the transaction in the segwit format
+        spend.addInput(foreign, 0, new Script(new byte[0]), new TransactionWitness(spend, List.of(new byte[71], new byte[33])));
+        spend.addOutput(900_000L, wallet.getAddress(node));
+
+        Transaction parsed = new Transaction(spend.bitcoinSerialize());
+        Assertions.assertTrue(parsed.getInputs().get(0).hasWitness(), "the segwit format gives the legacy input an empty witness");
+        Assertions.assertTrue(wallet.getUnsignedInputs(parsed, lookup(funding)).isEmpty(), "the legacy input's signature is in its scriptSig");
+    }
+
     private static boolean carriesUnified(Transaction transaction) {
         return transaction.getInputs().stream()
                 .flatMap(input -> (input.hasWitness() ? input.getWitness().getSignatures() : input.getScriptSig().getSignatures()).stream())
@@ -195,16 +260,20 @@ public class UnifiedUnsignedInputsTest {
     }
 
     private static Wallet multisigWallet() throws Exception {
+        return multisigWallet(ScriptType.P2WSH);
+    }
+
+    private static Wallet multisigWallet(ScriptType scriptType) throws Exception {
         Wallet wallet = new Wallet("quorum");
         wallet.setPolicyType(PolicyType.MULTI_HD);
-        wallet.setScriptType(ScriptType.P2WSH);
+        wallet.setScriptType(scriptType);
         for(int i = 1; i <= 3; i++) {
             DeterministicSeed seed = new DeterministicSeed(Utils.hexToBytes(String.format("%032x", i)), "", 0);
-            Keystore keystore = Keystore.fromSeed(seed, PolicyType.MULTI_HD, ScriptType.P2WSH.getDefaultDerivation());
+            Keystore keystore = Keystore.fromSeed(seed, PolicyType.MULTI_HD, scriptType.getDefaultDerivation());
             keystore.setLabel("Keystore " + i);
             wallet.getKeystores().add(keystore);
         }
-        wallet.setDefaultPolicy(Policy.getPolicy(PolicyType.MULTI_HD, ScriptType.P2WSH, wallet.getKeystores(), 2));
+        wallet.setDefaultPolicy(Policy.getPolicy(PolicyType.MULTI_HD, scriptType, wallet.getKeystores(), 2));
         wallet.setStoredBlockHeight(FUNDING_HEIGHT + 6);
         wallet.getNode(KeyPurpose.RECEIVE).fillToIndex(0);
         return wallet;

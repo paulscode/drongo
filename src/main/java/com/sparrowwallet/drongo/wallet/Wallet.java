@@ -1585,7 +1585,7 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
                 TransactionOutput spentTxo = inputTransaction.getOutputs().get((int)txInput.getOutpoint().getIndex());
 
                 Script signingScript = getSigningScript(txInput, spentTxo);
-                List<TransactionSignature> signatures = txInput.hasWitness() ? txInput.getWitness().getSignatures() : txInput.getScriptSig().getSignatures();
+                List<TransactionSignature> signatures = isWitnessed(txInput) ? txInput.getWitness().getSignatures() : txInput.getScriptSig().getSignatures();
                 Map<Byte, Sha256Hash> sigHashes = new HashMap<>();
 
                 for(ECKey sigPublicKey : keystoreKeysForNode.keySet()) {
@@ -1598,7 +1598,7 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
                                 return hashForUnifiedSignature(transaction, spentOutputs, txInput, signingWallet.getScriptType(), signingScript, sigHashType);
                             } else if(signingWallet.getScriptType() == P2TR) {
                                 return transaction.hashForTaprootSignature(spentOutputs, txInput.getIndex(), !P2TR.isScriptType(signingScript), signingScript, sigHashType, null);
-                            } else if(txInput.hasWitness()) {
+                            } else if(isWitnessed(txInput)) {
                                 return transaction.hashForWitnessSignature(txInput.getIndex(), signingScript.getProgram(), spentTxo.getValue(), sigHashType);
                             } else {
                                 return transaction.hashForLegacySignature(txInput.getIndex(), signingScript.getProgram(), sigHashType);
@@ -1626,11 +1626,21 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
     }
 
     /**
+     * Whether this input is spent by a witness. Not the same as hasWitness: in a transaction in the segwit format every
+     * input is given a witness, an empty one for a legacy input, so asking hasWitness read a legacy input's signatures
+     * from that empty witness, found none, and hashed as though it were witness v0. A legacy input in a transaction with
+     * a segwit input elsewhere then read as unsigned.
+     */
+    private static boolean isWitnessed(TransactionInput txInput) {
+        return txInput.hasWitness() && !txInput.getWitness().getPushes().isEmpty();
+    }
+
+    /**
      * Whether any signature on this input carries the opt-in bit. Read off the pushes without verifying them, which is
      * only used to decide what to fetch: a push that merely looks like one costs a lookup, never a verdict.
      */
     private static boolean carriesUnifiedSignature(TransactionInput txInput) {
-        List<TransactionSignature> signatures = txInput.hasWitness() ? txInput.getWitness().getSignatures() : txInput.getScriptSig().getSignatures();
+        List<TransactionSignature> signatures = isWitnessed(txInput) ? txInput.getWitness().getSignatures() : txInput.getScriptSig().getSignatures();
         return signatures.stream().anyMatch(signature -> (signature.sighashFlags & SigHash.UNIFIED_FLAG) != 0);
     }
 
@@ -1652,7 +1662,7 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
                     return null;
                 }
                 return transaction.hashForUnifiedSignature(spentOutputs, txInput.getIndex(), UnifiedScriptType.TAPROOT, null, sigHashType, null, null, null);
-            } else if(txInput.hasWitness()) {
+            } else if(isWitnessed(txInput)) {
                 return transaction.hashForUnifiedSignature(spentOutputs, txInput.getIndex(), UnifiedScriptType.WITNESS_V0, signingScript.getProgram(), sigHashType, null, null, null);
             } else {
                 return transaction.hashForUnifiedSignature(spentOutputs, txInput.getIndex(), UnifiedScriptType.BARE, signingScript.getProgram(), sigHashType, null, null, null);
