@@ -1077,7 +1077,11 @@ public class PSBTInput {
                 //and a signer handed the base type commit to different messages, which is the arrangement
                 //the opt-in exists to allow. Verifying both against the declaration rejected whichever of
                 //them disagreed with it, and rejected the PSBT with it.
+                //Bounded to the types this input asks for, though, or checking each signature against its own byte
+                //would accept one over a type nobody requested: a signer answering SIGHASH_NONE where ALL was asked for
+                //would verify and finalise, and that signature commits to no outputs at all.
                 if(isTaproot() && tapKeyPathSignature != null) {
+                    requireRequestedType(localSigHash, tapKeyPathSignature.sighashFlags);
                     ECKey outputKey = P2TR.getPublicKeyFromScript(getUtxo().getScript());
                     if(!outputKey.verify(hashForSignatureType(signingScript, tapKeyPathSignature, localSigHash), tapKeyPathSignature)) {
                         throw new PSBTSignatureException("Tweaked internal key does not verify against provided taproot keypath signature");
@@ -1085,6 +1089,7 @@ public class PSBTInput {
                 } else {
                     for(ECKey sigPublicKey : getPartialSignatures().keySet()) {
                         TransactionSignature signature = getPartialSignature(sigPublicKey);
+                        requireRequestedType(localSigHash, signature.sighashFlags);
                         if(!sigPublicKey.verify(hashForSignatureType(signingScript, signature, localSigHash), signature)) {
                             throw new PSBTSignatureException("Partial signature does not verify against provided public key");
                         }
@@ -1488,6 +1493,30 @@ public class PSBTInput {
      * an option either: this returns a hash, and throwing out of a verification would refuse the whole PSBT
      * over one signature. Falling back leaves that case exactly as it behaved before the opt-in existed.
      */
+    /**
+     * Whether a signature on this input carries a hash type it was asked for.
+     *
+     * The opt-in bit is the one thing a signer may differ on, because it is the one thing this wallet varies per signer:
+     * one that cannot opt in is handed the base type of what the input declares. For taproot, DEFAULT and ALL sign the
+     * same outputs, and a signer handed one commonly answers with the other. Anything else, a different output type or
+     * Anyone Can Pay where neither was declared, was not asked for by anyone. After Shrike's 3061687.
+     */
+    private boolean isRequestedType(SigHash declared, byte sigHashType) {
+        return baseOf(declared.value) == baseOf(sigHashType);
+    }
+
+    private byte baseOf(byte sigHashType) {
+        byte base = (byte)(sigHashType & ~SigHash.UNIFIED_FLAG);
+        return isTaproot() && base == SigHash.DEFAULT.value ? SigHash.ALL.value : base;
+    }
+
+    private void requireRequestedType(SigHash declared, byte sigHashType) throws PSBTSignatureException {
+        if(!isRequestedType(declared, sigHashType)) {
+            throw new PSBTSignatureException("Input " + index + " carries a signature with hash type 0x"
+                    + Integer.toHexString(Byte.toUnsignedInt(sigHashType)) + ", which is not the " + declared + " this input asks for");
+        }
+    }
+
     private Sha256Hash hashForSignatureType(Script connectedScript, TransactionSignature signature, SigHash declared) {
         SigHash sigHash;
         try {

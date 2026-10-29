@@ -231,4 +231,27 @@ public class VerifiedSignatureOptInTest {
         Map<ECKey, TransactionSignature> verified = Assertions.assertDoesNotThrow(() -> psbtInput.getVerifiedSignatures(Set.of(outputKey(KEY))));
         Assertions.assertTrue(verified.isEmpty(), "a script that cannot be read answers with nothing rather than throwing");
     }
+
+    /**
+     * Each signature is checked under the type it carries, so that an opted-in one can sit beside a legacy one. That must
+     * not become a way in for a type nobody asked for: a signer answering None where All was declared signs no outputs.
+     */
+    @Test
+    public void onlyTheDeclaredTypeOrItsOptInVariantIsAccepted() throws Exception {
+        PSBTInput optedIn = signedPsbt(SigHash.UNIFIED_ALL).getPsbtInputs().getFirst();
+        optedIn.setSigHash(SigHash.ALL);
+        Assertions.assertTrue(optedIn.verifySignatures(), "the opt-in bit is the one thing a signer may differ on");
+
+        PSBTInput legacy = signedPsbt(SigHash.ALL).getPsbtInputs().getFirst();
+        legacy.setSigHash(SigHash.UNIFIED_ALL);
+        Assertions.assertTrue(legacy.verifySignatures(), "an unmarked signer is handed the base type");
+
+        PSBTInput none = signedPsbt(SigHash.NONE).getPsbtInputs().getFirst();
+        none.setSigHash(SigHash.ALL);
+        Assertions.assertThrows(PSBTSignatureException.class, none::verifySignatures, "None was not asked for");
+
+        PSBTInput anyoneCanPay = signedPsbt(SigHash.ANYONECANPAY_ALL).getPsbtInputs().getFirst();
+        anyoneCanPay.setSigHash(SigHash.UNIFIED_ALL);
+        Assertions.assertThrows(PSBTSignatureException.class, anyoneCanPay::verifySignatures, "Anyone Can Pay was not asked for");
+    }
 }
