@@ -105,6 +105,33 @@ public class UnifiedUnsignedInputsTest {
         Assertions.assertTrue(wallet.getUnsignedInputs(spend, lookup(funding)).isEmpty(), "both signatures must be counted");
     }
 
+    /**
+     * A quorum signed by every cosigner holds more signatures than it needs, and finalising drops the surplus. Taking them
+     * in key order dropped the one that opted in whenever its key sorted last, and the transaction went out with no
+     * protection having had it. Each cosigner takes a turn as the one that opts in, so every position in key order is
+     * covered.
+     */
+    @Test
+    public void finalisingAnOverSignedQuorumKeepsTheOptedInSignature() throws Exception {
+        for(int optedIn = 0; optedIn < 3; optedIn++) {
+            Wallet wallet = multisigWallet();
+            fund(wallet);
+
+            PSBT psbt = createPsbt(wallet);
+            for(Map.Entry<PSBTInput, WalletNode> entry : wallet.getSigningNodes(psbt).entrySet()) {
+                PSBTInput psbtInput = entry.getKey();
+                for(int i = 0; i < 3; i++) {
+                    psbtInput.setSigHash(i == optedIn ? SigHash.UNIFIED_ALL : SigHash.ALL);
+                    psbtInput.sign(wallet.getScriptType().getOutputKey(wallet.getPolicyType(), wallet.getKeystores().get(i).getKey(entry.getValue())));
+                }
+                Assertions.assertEquals(3, psbtInput.getPartialSignatures().size());
+            }
+            wallet.finalise(psbt);
+
+            Assertions.assertTrue(carriesUnified(psbt.extractTransaction()), "cosigner " + optedIn + "'s opted-in signature must survive finalising");
+        }
+    }
+
     private static boolean carriesUnified(Transaction transaction) {
         return transaction.getInputs().stream()
                 .flatMap(input -> (input.hasWitness() ? input.getWitness().getSignatures() : input.getScriptSig().getSignatures()).stream())
